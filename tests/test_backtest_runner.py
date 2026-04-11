@@ -146,6 +146,9 @@ def test_run_full_backtest_writes_artifacts_manifest_and_plots(monkeypatch) -> N
         spread_paths = None,
         formation_spread = None,
         resume_from = None,
+        cache_base_dir = None,
+        cache_source = None,
+        extra_metadata = None,
     ):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents = True, exist_ok = True)

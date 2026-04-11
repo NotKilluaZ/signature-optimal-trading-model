@@ -134,6 +134,9 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
         spread_paths = None,
         formation_spread = None,
         resume_from = None,
+        cache_base_dir = None,
+        cache_source = None,
+        extra_metadata = None,
     ):
         entry_training_calls.append(
             {
@@ -141,6 +144,8 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
                 "horizon": int(spread_paths.shape[1] - 1),
                 "output_dir": str(output_dir),
                 "n_paths": int(spread_paths.shape[0]),
+                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
+                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
             }
         )
         return SimpleNamespace(
@@ -167,6 +172,8 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
                 "horizon": int(spread_paths.shape[1] - 1),
                 "output_dir": str(output_dir),
                 "n_paths": int(spread_paths.shape[0]),
+                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
+                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
             }
         )
         return SimpleNamespace(
@@ -206,18 +213,24 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
     assert len(entry_training_calls) == 2
     assert len(exit_training_calls) == 2
 
+    expected_training_cache_root = str((Path.cwd() / "data" / "synthetic" / "gs_ms" / "ou").resolve())
+
     assert entry_training_calls == [
         {
             "x0": 10.0,
             "horizon": 5,
             "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "entry" / "entry_start_0000"),
             "n_paths": 3,
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "entry",
         },
         {
             "x0": 13.0,
             "horizon": 2,
             "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "entry" / "entry_start_0003"),
             "n_paths": 3,
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "entry",
         },
     ]
     assert exit_training_calls == [
@@ -226,12 +239,16 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
             "horizon": 4,
             "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "exit" / "exit_start_0001"),
             "n_paths": 3,
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "exit",
         },
         {
             "x0": 14.0,
             "horizon": 1,
             "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "exit" / "exit_start_0004"),
             "n_paths": 3,
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "exit",
         },
     ]
 
@@ -243,6 +260,8 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
 
 def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> None:
     feature_build_calls: list[dict[str, object]] = []
+    entry_training_calls: list[dict[str, object]] = []
+    exit_training_calls: list[dict[str, object]] = []
 
     def fake_sample_stage_paths(config, ou_params, *, x0, horizon):
         paths = np.tile(
@@ -278,9 +297,22 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
         spread_paths = None,
         formation_spread = None,
         resume_from = None,
+        cache_base_dir = None,
+        cache_source = None,
+        extra_metadata = None,
     ):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents = True, exist_ok = True)
+        entry_training_calls.append(
+            {
+                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
+                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
+                "cache_source_kind": None if cache_source is None else cache_source.get("cache_kind"),
+                "extra_episode_stage": None
+                if extra_metadata is None
+                else extra_metadata.get("episode", {}).get("stage"),
+            }
+        )
         return SimpleNamespace(
             best_policy = LinearStoppingPolicy(weights = np.array([1.0], dtype = np.float32)),
             artifacts = SimpleNamespace(output_dir = output_dir),
@@ -301,6 +333,16 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
     ):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents = True, exist_ok = True)
+        exit_training_calls.append(
+            {
+                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
+                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
+                "cache_source_kind": None if cache_source is None else cache_source.get("cache_kind"),
+                "extra_episode_stage": None
+                if extra_metadata is None
+                else extra_metadata.get("episode", {}).get("stage"),
+            }
+        )
         return SimpleNamespace(
             best_policy = LinearStoppingPolicy(weights = np.array([1.0], dtype = np.float32)),
             artifacts = SimpleNamespace(output_dir = output_dir),
@@ -365,3 +407,32 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
     assert second_strategy.exit_stage_history[0].feature_cache_path is not None
     assert second_strategy.entry_stage_history[0].feature_cache_path.exists()
     assert second_strategy.exit_stage_history[0].feature_cache_path.exists()
+    expected_training_cache_root = str((Path.cwd() / "data" / "synthetic" / "gs_ms" / "ou").resolve())
+    assert entry_training_calls == [
+        {
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "entry",
+            "cache_source_kind": "sot_runtime_ou_sample",
+            "extra_episode_stage": "entry",
+        },
+        {
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "entry",
+            "cache_source_kind": "sot_runtime_ou_sample",
+            "extra_episode_stage": "entry",
+        },
+    ]
+    assert exit_training_calls == [
+        {
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "exit",
+            "cache_source_kind": "sot_runtime_ou_sample",
+            "extra_episode_stage": "exit",
+        },
+        {
+            "cache_base_dir": expected_training_cache_root,
+            "cache_source_stage": "exit",
+            "cache_source_kind": "sot_runtime_ou_sample",
+            "extra_episode_stage": "exit",
+        },
+    ]

@@ -78,11 +78,44 @@ def choose_best_orientation_from_map(results_by_orientation: dict[str, Any]) -> 
     return max(results_by_orientation.values(), key = lambda result: result.log_likelihood_star)
 
 
+def build_normalized_spread_inputs(
+    aligned_df: pd.DataFrame,
+    formation_df: pd.DataFrame,
+    trading_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    normalized_plot_df = construct_normalized_prices(aligned_df)
+    normalized_price_df = normalized_plot_df.rename(
+        columns = {
+            "MS_norm": "MS",
+            "GS_norm": "GS",
+        }
+    )[["date", "MS", "GS"]]
+
+    def _select_dates(window_df: pd.DataFrame) -> pd.DataFrame:
+        normalized_window = window_df[["date"]].merge(
+            normalized_price_df,
+            on = "date",
+            how = "left",
+            validate = "one_to_one",
+        )
+        if normalized_window[["MS", "GS"]].isna().any().any():
+            raise ValueError("Normalized spread inputs are missing split-window dates.")
+        return normalized_window
+
+    return (
+        normalized_plot_df,
+        _select_dates(formation_df),
+        _select_dates(trading_df),
+        normalized_price_df,
+    )
+
+
 def build_selection_metadata(
     pair: list[str],
     *,
     chosen_result: Any,
     results_by_orientation: dict[str, Any],
+    price_basis: str = "normalized_initial_full_history",
 ) -> dict[str, Any]:
     orientation_tested: dict[str, Any] = {}
     for orientation in VALID_ORIENTATIONS:
@@ -100,6 +133,7 @@ def build_selection_metadata(
 
     return {
         "pair": pair,
+        "price_basis": str(price_basis),
         "chosen_orientation": chosen_result.orientation,
         "chosen_beta": float(chosen_result.beta_star),
         "chosen_log_likelihood": float(chosen_result.log_likelihood_star),
@@ -147,14 +181,24 @@ def main() -> None:
     formation_df = pd.read_parquet(formation_path)
     trading_df = pd.read_parquet(trading_path)
 
+    (
+        normalzied_df,
+        normalized_formation_df,
+        normalized_trading_df,
+        normalized_aligned_df,
+    ) = build_normalized_spread_inputs(
+        aligned_df,
+        formation_df,
+        trading_df,
+    )
+
     # Create and store normalized aligned DataFrame artifact into folder
-    normalzied_df = construct_normalized_prices(aligned_df)
     normalzied_path = artifacts_dir / "prices_normalized_init.parquet"
     normalzied_df.to_parquet(normalzied_path, index = False)
 
     # Run the beta search for highest likelihood value on both orientations then compare
     results_by_orientation = run_orientation_searches(
-        formation_df,
+        normalized_formation_df,
         min_factor = min_factor,
         max_factor = max_factor,
         grid_points = grid_points,
@@ -167,9 +211,21 @@ def main() -> None:
     best_result = choose_best_orientation_from_map(results_by_orientation)
 
     # Build spreads
-    spread_full = construct_spread(aligned_df, best_result.beta_star, best_result.orientation)
-    spread_formation = construct_spread(formation_df, best_result.beta_star, best_result.orientation)
-    spread_trading = construct_spread(trading_df, best_result.beta_star, best_result.orientation)
+    spread_full = construct_spread(
+        normalized_aligned_df,
+        best_result.beta_star,
+        best_result.orientation,
+    )
+    spread_formation = construct_spread(
+        normalized_formation_df,
+        best_result.beta_star,
+        best_result.orientation,
+    )
+    spread_trading = construct_spread(
+        normalized_trading_df,
+        best_result.beta_star,
+        best_result.orientation,
+    )
 
     # Store artifacts
     spread_full_path = artifacts_dir / "spread_full.parquet"
@@ -199,6 +255,7 @@ def main() -> None:
         ["GS", "MS"],
         chosen_result = best_result,
         results_by_orientation = results_by_orientation,
+        price_basis = "normalized_initial_full_history",
     )
 
     selection_path = artifacts_dir / "spread_selection_data.json"
@@ -209,7 +266,7 @@ def main() -> None:
     plot_spread(
         spread_df=spread_trading,
         title=(
-            f"GS & MS trading spread | "
+            f"GS & MS trading spread (normalized prices) | "
             f"{best_result.orientation} | beta={best_result.beta_star:.6f}"
         ),
         output_path=plots_dir / "gs_ms_spread_trading.png",

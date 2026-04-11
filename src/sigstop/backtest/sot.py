@@ -1,6 +1,7 @@
 from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,16 @@ def resolve_backtest_feature_cache_root(config: dict[str, Any]) -> Path:
     return features_dir / "backtest_stage_cache"
 
 
+# Resolve the persistent root directory for cached synthetic SOT training tensors
+def resolve_sot_training_cache_root(config: dict[str, Any]) -> Path:
+    synthetic_dir = Path(
+        _get_config_value(config, ["generator", "cache", "synthetic_dir"], "data/synthetic/gs_ms/ou")
+    )
+    if not synthetic_dir.is_absolute():
+        synthetic_dir = ROOT_DIR / synthetic_dir
+    return synthetic_dir
+
+
 # Build the feature settings dictionary used by real SOT stage tensors
 def build_real_stage_feature_settings(config: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -160,6 +171,48 @@ def build_real_stage_feature_settings(config: dict[str, Any]) -> dict[str, Any]:
         "device": str(_get_config_value(config, ["features", "signature", "device"], "cpu")),
         "basepoint": bool(_get_config_value(config, ["features", "signature", "basepoint"], False)),
         "mode": "prefix",
+    }
+
+
+# Hash one numeric array into a stable digest for runtime cache provenance
+def _hash_numeric_array(values: np.ndarray) -> str:
+    resolved = np.ascontiguousarray(np.asarray(values, dtype = np.float64))
+    digest = hashlib.sha256()
+    digest.update(str(resolved.dtype).encode("utf-8"))
+    digest.update(np.asarray(resolved.shape, dtype = np.int64).tobytes())
+    digest.update(resolved.view(np.uint8).tobytes())
+    return digest.hexdigest()
+
+
+# Serialize one sample-request-like object into stable cache metadata
+def _serialize_sample_request(sample_request: Any) -> dict[str, Any]:
+    if hasattr(sample_request, "to_dict"):
+        payload = sample_request.to_dict()
+        if isinstance(payload, dict):
+            return payload
+    if hasattr(sample_request, "__dict__"):
+        return {
+            str(key): value
+            for key, value in vars(sample_request).items()
+            if not str(key).startswith("_")
+        }
+    raise TypeError("sample_request must provide to_dict() or __dict__ for cache serialization.")
+
+
+# Build deterministic source metadata for one cached SOT stage training dataset
+def build_sot_stage_training_cache_source(
+    *,
+    stage: str,
+    sample_request: OUSampleRequest,
+    ou_params: OUGeneratorParams,
+    formation_spread: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "cache_kind": "sot_runtime_ou_sample",
+        "stage": str(stage),
+        "sample_request": _serialize_sample_request(sample_request),
+        "ou_params": ou_params.to_dict(),
+        "formation_spread_hash": _hash_numeric_array(formation_spread),
     }
 
 
@@ -294,6 +347,7 @@ class SOTBacktestStrategy(BacktestStrategy):
             _get_config_value(self.config, ["sot", "cache_episode_features"], True)
         )
         self.feature_cache_root = resolve_backtest_feature_cache_root(self.config)
+        self.training_cache_root = resolve_sot_training_cache_root(self.config)
 
         self._active_entry_plan: SOTStagePlan | None = None
         self._active_exit_plan: SOTStagePlan | None = None
@@ -450,12 +504,28 @@ class SOTBacktestStrategy(BacktestStrategy):
                 trigger_spread = None,
             )
 
-        synthetic_paths, _ = sample_sot_stage_paths(
+        synthetic_paths, sample_request = sample_sot_stage_paths(
             self.config,
             self.ou_params,
             x0 = initial_spread,
             horizon = horizon,
         )
+        training_cache_source = build_sot_stage_training_cache_source(
+            stage = stage,
+            sample_request = sample_request,
+            ou_params = self.ou_params,
+            formation_spread = self.formation_spread,
+        )
+        training_extra_metadata = {
+            "source": training_cache_source,
+            "episode": {
+                "stage": stage,
+                "state_start_index": stage_start_index,
+                "state_start_date": state_start_date,
+                "initial_spread": float(initial_spread),
+                "horizon": int(horizon),
+            },
+        }
 
         if stage == "entry":
             training_result = train_entry_policy(
@@ -464,6 +534,9 @@ class SOTBacktestStrategy(BacktestStrategy):
                 run_id = self.run_id,
                 spread_paths = synthetic_paths,
                 formation_spread = self.formation_spread,
+                cache_base_dir = self.training_cache_root,
+                cache_source = training_cache_source,
+                extra_metadata = training_extra_metadata,
             )
         elif stage == "exit":
             training_result = train_exit_policy(
@@ -472,6 +545,9 @@ class SOTBacktestStrategy(BacktestStrategy):
                 run_id = self.run_id,
                 spread_paths = synthetic_paths,
                 formation_spread = self.formation_spread,
+                cache_base_dir = self.training_cache_root,
+                cache_source = training_cache_source,
+                extra_metadata = training_extra_metadata,
             )
         else:
             raise ValueError(f"Unsupported SOT stage: {stage!r}")

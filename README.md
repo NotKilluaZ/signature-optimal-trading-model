@@ -14,7 +14,7 @@ The repo is intentionally Git-clean by default: raw data, cached features, model
 
 - Pair: Goldman Sachs (`GS`) and Morgan Stanley (`MS`)
 - Pipeline: download data -> align -> split -> choose spread orientation/beta -> fit OU simulator -> train stopping policies -> backtest
-- Reference local run: SOT Sharpe `0.949` vs baseline Sharpe `0.474`
+- Reference local run: SOT total return `22.39%` on `5` trades vs baseline `5.24%` on `4` trades
 - Scope: research prototype only, not investment advice
 
 More detail lives in [Results.md](Results.md).
@@ -73,19 +73,20 @@ pytest
 
 ## Reference Results
 
-The current release docs summarize a local pre-release backtest on the default configuration in `configs/default.yaml`.
+The current release docs summarize a corrected normalized-spread backtest on the default configuration in `configs/default.yaml`.
 
 | Strategy | Trades | Avg holding days | Sharpe | Max drawdown | Total net PnL | Total return |
 |    ---   |  ---:  |       ---:       |  ---:  |     ---:     |      ---:     |     ---:     |
-|    SOT   |   4    |       9.5        | 0.949  |    -0.876    |     1.2696    |    126.96%   |
-| Baseline |   4    |       28.0       | 0.474  |    -0.502    |     0.0811    |     8.11%    |
+|    SOT   |   5    |       24.4       | 1.298  |    -0.044    |     0.2239    |     22.39%   |
+| Baseline |   4    |       6.75       | 1.820  |     0.000    |     0.0524    |      5.24%   |
 
 Key run facts from the same reference run:
 
 - Formation window: `2021-01-04` to `2021-12-31`
 - Trading window: `2022-01-03` to `2023-01-03`
-- Selected spread orientation: `MS_minus_beta_GS`
-- Selected hedge ratio (`beta`): `0.217523`
+- Price basis: normalized full aligned history before beta search and spread construction
+- Selected spread orientation: `GS_minus_beta_MS`
+- Selected hedge ratio (`beta`): `0.862099`
 - Signature depth: `4`
 - Deterministic threshold: `k = 0.05`, `mu = 20.0`
 

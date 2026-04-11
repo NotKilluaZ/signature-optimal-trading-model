@@ -132,6 +132,9 @@ def train_entry_policy(
     spread_paths: np.ndarray | None = None,
     formation_spread: np.ndarray | None = None,
     resume_from: str | Path | None = None,
+    cache_base_dir: str | Path | None = None,
+    cache_source: dict[str, Any] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> TrainingResult:
     if config is not None and config_path is not None:
         raise ValueError("Provide either config or config_path, not both.")
@@ -146,7 +149,27 @@ def train_entry_policy(
     if spread_paths is not None:
         if formation_spread is None:
             raise ValueError("formation_spread is required when spread_paths are provided.")
-        training_data = build_entry_training_data(spread_paths, formation_spread, resolved_config)
+        if cache_base_dir is not None and cache_source is not None:
+            training_data, _, _, _ = load_or_build_synthetic_training_data(
+                stage = "entry",
+                config = resolved_config,
+                cache_base_dir = cache_base_dir,
+                source = cache_source,
+                builder = lambda: build_entry_training_data(
+                    spread_paths,
+                    formation_spread,
+                    resolved_config,
+                ),
+                extra_metadata = extra_metadata,
+            )
+        else:
+            training_data = build_entry_training_data(
+                spread_paths,
+                formation_spread,
+                resolved_config,
+            )
+            if extra_metadata is not None:
+                training_data.metadata.update(extra_metadata)
     else:
         training_data = load_default_entry_training_data(resolved_config)
 

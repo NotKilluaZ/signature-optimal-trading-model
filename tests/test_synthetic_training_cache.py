@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import numpy as np
 
+import src.sigstop.train.train_entry as train_entry_module
 import src.sigstop.train.train_exit as train_exit_module
 from src.sigstop.stopping.policy import LinearStoppingPolicy
 from src.sigstop.train.synthetic_cache import load_or_build_synthetic_training_data
@@ -264,6 +265,100 @@ def test_train_exit_policy_reuses_cached_synthetic_training_data(
         extra_metadata = {"source": source},
     )
     second = train_exit_module.train_exit_policy(
+        spread_paths = spread_paths,
+        formation_spread = formation_spread,
+        cache_base_dir = cache_dir,
+        cache_source = source,
+        extra_metadata = {"source": source},
+    )
+
+    assert builder_calls["count"] == 1
+    assert first.train_features_shape == (2, 2, 2)
+    assert second.train_features_shape == (2, 2, 2)
+
+
+def test_train_entry_policy_reuses_cached_synthetic_training_data(
+    monkeypatch,
+) -> None:
+    config = _toy_config()
+    cache_dir = _make_test_dir()
+    builder_calls = {"count": 0}
+    spread_paths = np.array(
+        [
+            [10.0, 10.5, 10.25],
+            [9.8, 10.1, 10.4],
+        ],
+        dtype = np.float64,
+    )
+    formation_spread = np.array([9.5, 10.0, 10.5], dtype = np.float64)
+    source = {
+        "cache_kind": "runtime_entry_ou_sample",
+        "entry_row_index": 12,
+        "entry_spread": 10.0,
+        "sample_request": {
+            "x0": 10.0,
+            "horizon": 2,
+            "n_paths": 2,
+            "seed": 42,
+            "dt": 1.0,
+            "dtype": "float64",
+            "device": "cpu",
+            "include_innovations": False,
+        },
+    }
+
+    def fake_load_config(path = None) -> dict:
+        return config
+
+    def fake_build_entry_training_data(
+        spread_paths_arg: np.ndarray,
+        formation_spread_arg: np.ndarray,
+        config_arg: dict,
+    ) -> StoppingTrainingData:
+        builder_calls["count"] += 1
+        np.testing.assert_allclose(spread_paths_arg, spread_paths)
+        np.testing.assert_allclose(formation_spread_arg, formation_spread)
+        assert config_arg is config
+        return _dummy_training_data("entry")
+
+    def fake_train_linear_stopping_policy(
+        features: np.ndarray,
+        payoffs: np.ndarray,
+        training_config,
+        **kwargs,
+    ) -> TrainingResult:
+        policy = LinearStoppingPolicy(weights = np.array([0.0, 0.0], dtype = np.float32))
+        return TrainingResult(
+            policy = policy,
+            best_policy = policy,
+            optimizer_state = {},
+            history = TrainingHistory(),
+            config = training_config,
+            artifacts = None,
+            train_features_shape = tuple(features.shape),
+            train_payoffs_shape = tuple(payoffs.shape),
+        )
+
+    monkeypatch.setattr(train_entry_module, "load_config", fake_load_config)
+    monkeypatch.setattr(
+        train_entry_module,
+        "build_entry_training_data",
+        fake_build_entry_training_data,
+    )
+    monkeypatch.setattr(
+        train_entry_module,
+        "train_linear_stopping_policy",
+        fake_train_linear_stopping_policy,
+    )
+
+    first = train_entry_module.train_entry_policy(
+        spread_paths = spread_paths,
+        formation_spread = formation_spread,
+        cache_base_dir = cache_dir,
+        cache_source = source,
+        extra_metadata = {"source": source},
+    )
+    second = train_entry_module.train_entry_policy(
         spread_paths = spread_paths,
         formation_spread = formation_spread,
         cache_base_dir = cache_dir,
