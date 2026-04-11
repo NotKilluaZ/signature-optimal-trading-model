@@ -1,18 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 import numpy as np
 import pandas as pd
-
-from src.sigstop.backtest.engine import (
-    BacktestDayContext,
-    BacktestStrategy,
-    StrategyDecision,
-    validate_trading_window,
-)
+from src.sigstop.backtest.engine import BacktestDayContext, BacktestStrategy, StrategyDecision, validate_trading_window
 from src.sigstop.config import load_config
 
 

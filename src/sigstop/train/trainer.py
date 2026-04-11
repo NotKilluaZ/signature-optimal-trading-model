@@ -17,7 +17,7 @@ from src.sigstop.stopping.torch_policy import (
     build_torch_policy_from_linear_policy,
     initialize_torch_policy_from_feature_tensor,
     resolve_torch_device,
-    resolve_torch_dtype,
+    resolve_torch_dtype
 )
 
 

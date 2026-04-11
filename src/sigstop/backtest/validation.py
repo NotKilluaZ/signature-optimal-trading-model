@@ -1,13 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Any
-
 import numpy as np
 import pandas as pd
-
 from src.sigstop.backtest.baseline import BaselineStrategyConfig
 from src.sigstop.backtest.engine import BacktestEngineResult, StrategyAction, validate_trading_window
 

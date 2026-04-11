@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 import json
 import os
@@ -8,18 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-
 import numpy as np
 import pandas as pd
 import yaml
-
 from src.sigstop.backtest.accounting import build_trade_ledger, save_trade_ledger
 from src.sigstop.backtest.baseline import BaselineBacktestStrategy
 from src.sigstop.backtest.engine import (
     BacktestEngineResult,
     build_backtest_engine_config,
     run_backtest_engine,
-    validate_trading_window,
+    validate_trading_window
 )
 from src.sigstop.backtest.metrics import (
     BacktestPerformanceSummary,
@@ -28,20 +25,20 @@ from src.sigstop.backtest.metrics import (
     build_equity_curve,
     build_performance_summary,
     save_comparison_metrics_table,
-    save_equity_curve,
+    save_equity_curve
 )
 from src.sigstop.backtest.reporting import (
     save_drawdown_comparison_plot,
     save_equity_curve_comparison_plot,
     save_holding_time_histogram,
     save_json,
-    save_spread_with_trade_markers_plot,
+    save_spread_with_trade_markers_plot
 )
 from src.sigstop.backtest.sot import SOTBacktestStrategy
 from src.sigstop.backtest.validation import (
     BacktestValidationResult,
     build_backtest_validation_report,
-    save_validation_report,
+    save_validation_report
 )
 from src.sigstop.config import load_config
 from src.sigstop.features.manifest import compute_file_sha256, safe_package_version
