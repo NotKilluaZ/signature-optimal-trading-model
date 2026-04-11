@@ -1,0 +1,12 @@
+﻿# Runtime dependencies for the public GS-MS release pipeline.
+esig==1.0.0
+matplotlib==3.10.8
+numpy==2.4.3
+pandas==3.0.1
+pyarrow==23.0.1
+PyYAML==6.0.3
+scipy==1.17.1
+statsmodels==0.14.6
+# Keep torch within the tested major/minor range without pinning a local CUDA wheel.
+torch>=2.11,<2.12
+yfinance==1.2.0

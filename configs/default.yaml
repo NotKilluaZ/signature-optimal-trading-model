@@ -1,0 +1,195 @@
+project:
+  name: optimal_statistical_arbitrage
+  seed: 42
+
+data:
+  provider: yfinance
+  symbols:
+    - MS
+    - GS
+  start_date: "2021-01-01"
+  end_date: "2023-01-31"
+  interval: "1d"
+  auto_adjust: false
+
+storage:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  manifests_dir: "data/manifests"
+  file_format: "parquet"
+  overwrite: false
+
+alignment:
+  method: "intersection"
+  price_column: "adj_close"
+
+split:
+  formation_days: 252
+  trading_days: 252
+
+backtest:
+  trading_days: 252
+  execution_price: "close"
+  allow_forced_exit_end: true
+  annualization_factor: 252
+
+sot:
+  retrain_cadence: "per_trade"
+  k: 0.05
+  mu: 20.0
+  ou_samples_M: 2000
+  feature_depth_N: 4
+  cache_episode_features: true
+
+baseline:
+  ma_window: 100
+  k: 0.1
+  min_periods: 100
+  use_shift_1: true
+
+costs:
+  fixed_per_action: 0.001
+  proportional: 0.0005
+  slippage_bps: 0.0
+  model: "spread_proxy"
+
+metrics:
+  rf_rate_daily: 0.0
+  report:
+    include_daily: true
+    include_annualized: true
+
+artifacts:
+  root: "runs"
+  save_trades: true
+  save_equity_curve: true
+  save_plots: true
+  save_manifests: true
+
+beta_optimization:
+  bounds:
+    min_factor: 0.1
+    max_factor: 10.0
+  grid:
+    points: 200
+  refine:
+    max_iter: 200
+    tol: 1e-6
+
+ou_fit:
+  dt_days: 1.0
+  numeric_stability:
+    var_floor: 1e-12
+
+diagnostics:
+  adf_alpha: 0.05
+  kpss_alpha: 0.05
+  half_life_warn_range:
+    - 3.0
+    - 90.0
+  acf_nlags: 60
+
+features:
+  source_artifacts_dir: "data/processed/artifacts"
+  artifacts_dir: "data/features"
+  signature:
+    library: "esig"
+    depth: 4
+    scalar_term: true
+    min_prefix: 2
+    dtype: "float32"
+    device: "cpu"
+    basepoint: false
+  augmentation:
+    add_time: true
+    time_representation: "index_0_1"
+  scaling:
+    spread_scaler: "zscore"
+    fit_on: "formation_only"
+  caching:
+    format: "npz"
+
+stopping:
+  deterministic_threshold:
+    k: 0.05
+    mu: 20.0
+  score:
+    use_square: true
+    cumulative: true
+  policy:
+    include_bias: false
+    scalar_term_in_signatures: true
+    init: "small_normal"
+    init_weight_scale: 1.0e-2
+  payoff:
+    entry:
+      r: 0.0
+      c: 0.0
+      formula: "exp(-r t) * (-X - c)"
+    exit:
+      r_hat: 0.0
+      c_hat: 0.0
+      formula: "exp(-r_hat t) * (X - c_hat)"
+
+training:
+  M: 2000
+  horizon_days: 252
+  device: "cuda_if_available"
+  batch_size: 128
+  validation:
+    fraction: 0.2
+    shuffle: true
+  optimizer:
+    name: "adam"
+    lr: 1.0e-3
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+  schedule:
+    max_epochs: 200
+    early_stopping:
+      enabled: true
+      patience: 20
+      min_delta: 1.0e-4
+  regularization:
+    grad_clip:
+      enabled: true
+      max_norm: 5.0
+  checkpointing:
+    save_best: true
+    save_last: true
+
+repro:
+  seed: 42
+  torch_manual_seed: true
+  deterministic_algorithms: false
+  pytorch_deterministic: false
+
+generator:
+  type: "ou"
+
+  fit:
+    dt: 1.0
+    method: "transition_mle"
+    kappa_min: 1e-6
+    sigma_min: 1e-6
+    var_floor: 1e-12
+
+  sample:
+    horizon: 252
+    n_paths: 2000
+    dtype: "float64"
+    device: "cpu"
+    include_innovations: false
+
+  cache:
+    synthetic_dir: "data/synthetic/gs_ms/ou"
+    format: "npz"
+    chunk_size_paths: 500
+
+  validation:
+    enabled: true
+    check_finite: true
+    check_shape: true
+    check_x0_column: true
+    acf_nlags: 60
