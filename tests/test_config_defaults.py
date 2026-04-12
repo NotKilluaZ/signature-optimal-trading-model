@@ -16,9 +16,15 @@ def test_default_config_exposes_backtest_surface() -> None:
         "retrain_cadence": "per_trade",
         "k": 0.05,
         "mu": 20.0,
-        "ou_samples_M": 2000,
+        "ou_samples_M": 100,
         "feature_depth_N": 4,
+        "episode_horizon": 60,
+        "pretrain_horizon": 60,
         "cache_episode_features": True,
+        "rolling_refit": {
+            "enabled": False,
+            "window": 60,
+        },
     }
     assert config["baseline"] == {
         "ma_window": 100,
@@ -56,6 +62,9 @@ def test_default_backtest_surface_stays_consistent_with_existing_training_defaul
 
     assert config["sot"]["k"] == config["stopping"]["deterministic_threshold"]["k"]
     assert config["sot"]["mu"] == config["stopping"]["deterministic_threshold"]["mu"]
-    assert config["sot"]["ou_samples_M"] == config["training"]["M"]
-    assert config["sot"]["ou_samples_M"] == config["generator"]["sample"]["n_paths"]
     assert config["sot"]["feature_depth_N"] == config["features"]["signature"]["depth"]
+    assert config["sot"]["ou_samples_M"] == 100
+    assert config["training"]["M"] == 2000
+    assert config["generator"]["sample"]["n_paths"] == 5000
+    assert config["sot"]["ou_samples_M"] != config["training"]["M"]
+    assert config["sot"]["ou_samples_M"] != config["generator"]["sample"]["n_paths"]

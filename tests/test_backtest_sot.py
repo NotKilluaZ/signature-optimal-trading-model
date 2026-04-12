@@ -88,6 +88,78 @@ def _toy_ou_params() -> OUGeneratorParams:
     )
 
 
+def _install_fake_pretrained_sot_policies(monkeypatch) -> dict[str, list[dict[str, object]]]:
+    dataset_calls: list[dict[str, object]] = []
+    training_calls: list[dict[str, object]] = []
+
+    def _fake_training_data(stage: str, spread_paths, formation_spread, config):
+        paths = np.asarray(spread_paths, dtype = np.float64)
+        dataset_calls.append(
+            {
+                "stage": stage,
+                "n_paths": int(paths.shape[0]),
+                "horizon": int(paths.shape[1] - 1),
+            }
+        )
+        return SimpleNamespace(
+            features = np.ones((int(paths.shape[0]), 1, 1), dtype = np.float32),
+            payoffs = np.ones((int(paths.shape[0]), 2), dtype = np.float32),
+            prefix_ends = np.array([1], dtype = np.int32),
+            feature_spec = {"stage": stage, "feature_dim": 1},
+            scaler_spec = {"stage": stage},
+            metadata = {"stage": stage},
+        )
+
+    def fake_build_entry_training_data(spread_paths, formation_spread, config):
+        return _fake_training_data("entry", spread_paths, formation_spread, config)
+
+    def fake_build_exit_training_data(spread_paths, formation_spread, config):
+        return _fake_training_data("exit", spread_paths, formation_spread, config)
+
+    def fake_train_linear_stopping_policy(
+        features,
+        payoffs,
+        config,
+        *,
+        output_dir = None,
+        stage = "entry",
+        run_id = None,
+        initial_policy = None,
+        resume_from = None,
+        extra_manifest_data = None,
+    ):
+        feature_dim = int(np.asarray(features).shape[-1])
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents = True, exist_ok = True)
+        manifest_path = output_dir / "manifest.json"
+        policy_best_path = output_dir / "policy_best.pt"
+        manifest_path.write_text(f'{{"stage":"{stage}"}}', encoding = "utf-8")
+        policy_best_path.write_text(f"{stage}-policy", encoding = "utf-8")
+        training_calls.append(
+            {
+                "stage": stage,
+                "feature_dim": feature_dim,
+                "output_dir": str(output_dir),
+            }
+        )
+        return SimpleNamespace(
+            best_policy = LinearStoppingPolicy(weights = np.ones(feature_dim, dtype = np.float32)),
+            artifacts = SimpleNamespace(
+                output_dir = output_dir,
+                manifest_path = manifest_path,
+                policy_best_path = policy_best_path,
+            ),
+        )
+
+    monkeypatch.setattr("src.sigstop.backtest.sot.build_entry_training_data", fake_build_entry_training_data)
+    monkeypatch.setattr("src.sigstop.backtest.sot.build_exit_training_data", fake_build_exit_training_data)
+    monkeypatch.setattr("src.sigstop.backtest.sot.train_linear_stopping_policy", fake_train_linear_stopping_policy)
+    return {
+        "dataset_calls": dataset_calls,
+        "training_calls": training_calls,
+    }
+
+
 def test_build_effective_sot_config_overlays_strategy_defaults_onto_training_inputs() -> None:
     config = build_effective_sot_config(_toy_config())
 
@@ -102,18 +174,7 @@ def test_build_effective_sot_config_overlays_strategy_defaults_onto_training_inp
     assert config["features"]["signature"]["depth"] == 1
 
 
-def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(monkeypatch) -> None:
-    entry_training_calls: list[dict[str, object]] = []
-    exit_training_calls: list[dict[str, object]] = []
-
-    def fake_sample_stage_paths(config, ou_params, *, x0, horizon):
-        paths = np.tile(
-            np.linspace(float(x0), float(x0) + float(max(horizon, 0)), int(horizon) + 1, dtype = np.float64),
-            (int(config["generator"]["sample"]["n_paths"]), 1),
-        )
-        request = SimpleNamespace(horizon = int(horizon), x0 = float(x0))
-        return paths, request
-
+def test_sot_strategy_pretrains_once_per_strategy_and_reuses_inside_engine(monkeypatch) -> None:
     def fake_build_real_stage_feature_tensor(spread_segment, formation_spread, config):
         segment = np.asarray(spread_segment, dtype = np.float64)
         n_prefix = max(len(segment) - 1, 0)
@@ -125,66 +186,8 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
             feature_spec = {"n_prefix": n_prefix},
         )
 
-    def fake_train_entry_policy(
-        config_path = None,
-        *,
-        config = None,
-        output_dir = None,
-        run_id = None,
-        spread_paths = None,
-        formation_spread = None,
-        resume_from = None,
-        cache_base_dir = None,
-        cache_source = None,
-        extra_metadata = None,
-    ):
-        entry_training_calls.append(
-            {
-                "x0": float(spread_paths[0, 0]),
-                "horizon": int(spread_paths.shape[1] - 1),
-                "output_dir": str(output_dir),
-                "n_paths": int(spread_paths.shape[0]),
-                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
-                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
-            }
-        )
-        return SimpleNamespace(
-            best_policy = LinearStoppingPolicy(weights = np.array([1.0], dtype = np.float32)),
-            artifacts = SimpleNamespace(output_dir = Path(output_dir)),
-        )
-
-    def fake_train_exit_policy(
-        config_path = None,
-        *,
-        config = None,
-        output_dir = None,
-        run_id = None,
-        spread_paths = None,
-        formation_spread = None,
-        resume_from = None,
-        cache_base_dir = None,
-        cache_source = None,
-        extra_metadata = None,
-    ):
-        exit_training_calls.append(
-            {
-                "x0": float(spread_paths[0, 0]),
-                "horizon": int(spread_paths.shape[1] - 1),
-                "output_dir": str(output_dir),
-                "n_paths": int(spread_paths.shape[0]),
-                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
-                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
-            }
-        )
-        return SimpleNamespace(
-            best_policy = LinearStoppingPolicy(weights = np.array([1.0], dtype = np.float32)),
-            artifacts = SimpleNamespace(output_dir = Path(output_dir)),
-        )
-
-    monkeypatch.setattr("src.sigstop.backtest.sot.sample_sot_stage_paths", fake_sample_stage_paths)
+    pretrain_calls = _install_fake_pretrained_sot_policies(monkeypatch)
     monkeypatch.setattr("src.sigstop.backtest.sot.build_real_stage_feature_tensor", fake_build_real_stage_feature_tensor)
-    monkeypatch.setattr("src.sigstop.backtest.sot.train_entry_policy", fake_train_entry_policy)
-    monkeypatch.setattr("src.sigstop.backtest.sot.train_exit_policy", fake_train_exit_policy)
 
     config = _toy_config()
     config["sot"]["cache_episode_features"] = False
@@ -204,72 +207,49 @@ def test_sot_strategy_retrains_once_per_trade_stage_and_repeats_inside_engine(mo
     assert [record.action for record in result.step_records] == [
         StrategyAction.HOLD,
         StrategyAction.ENTER_LONG_SPREAD,
+        StrategyAction.HOLD,
         StrategyAction.EXIT_LONG_SPREAD,
         StrategyAction.HOLD,
         StrategyAction.ENTER_LONG_SPREAD,
-        StrategyAction.EXIT_LONG_SPREAD,
     ]
 
-    assert len(entry_training_calls) == 2
-    assert len(exit_training_calls) == 2
-
-    expected_training_cache_root = str((Path.cwd() / "data" / "synthetic" / "gs_ms" / "ou").resolve())
-
-    assert entry_training_calls == [
+    assert pretrain_calls["dataset_calls"] == [
         {
-            "x0": 10.0,
-            "horizon": 5,
-            "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "entry" / "entry_start_0000"),
+            "stage": "entry",
             "n_paths": 3,
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "entry",
+            "horizon": 252,
         },
         {
-            "x0": 13.0,
-            "horizon": 2,
-            "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "entry" / "entry_start_0003"),
+            "stage": "exit",
             "n_paths": 3,
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "entry",
+            "horizon": 252,
         },
     ]
-    assert exit_training_calls == [
+    assert pretrain_calls["training_calls"] == [
         {
-            "x0": 11.0,
-            "horizon": 4,
-            "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "exit" / "exit_start_0001"),
-            "n_paths": 3,
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "exit",
+            "stage": "entry",
+            "feature_dim": 1,
+            "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "pretrain" / "entry"),
         },
         {
-            "x0": 14.0,
-            "horizon": 1,
-            "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "exit" / "exit_start_0004"),
-            "n_paths": 3,
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "exit",
+            "stage": "exit",
+            "feature_dim": 1,
+            "output_dir": str(Path("runs") / "pytest_artifacts" / "sot_strategy_retrain" / "pretrain" / "exit"),
         },
     ]
 
     assert len(strategy.entry_stage_history) == 2
-    assert len(strategy.exit_stage_history) == 2
+    assert len(strategy.exit_stage_history) == 1
+    assert strategy.entry_stage_history[0].training_result is strategy.pretrained_entry_result
+    assert strategy.exit_stage_history[0].training_result is strategy.pretrained_exit_result
+    assert strategy.pretrained_entry_result.artifacts.manifest_path.exists()
+    assert strategy.pretrained_exit_result.artifacts.manifest_path.exists()
     assert result.step_records[1].decision_metadata["policy_id"] == "sot_entry_0000"
-    assert result.step_records[2].decision_metadata["policy_id"] == "sot_exit_0001"
+    assert result.step_records[3].decision_metadata["policy_id"] == "sot_exit_0002"
 
 
 def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> None:
     feature_build_calls: list[dict[str, object]] = []
-    entry_training_calls: list[dict[str, object]] = []
-    exit_training_calls: list[dict[str, object]] = []
-
-    def fake_sample_stage_paths(config, ou_params, *, x0, horizon):
-        paths = np.tile(
-            np.linspace(float(x0), float(x0) + float(max(horizon, 0)), int(horizon) + 1, dtype = np.float64),
-            (int(config["generator"]["sample"]["n_paths"]), 1),
-        )
-        request = SimpleNamespace(horizon = int(horizon), x0 = float(x0))
-        return paths, request
 
     def fake_build_real_stage_feature_tensor(spread_segment, formation_spread, config):
         segment = np.asarray(spread_segment, dtype = np.float64)
@@ -288,75 +268,13 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
             feature_spec = {"n_prefix": n_prefix},
         )
 
-    def fake_train_entry_policy(
-        config_path = None,
-        *,
-        config = None,
-        output_dir = None,
-        run_id = None,
-        spread_paths = None,
-        formation_spread = None,
-        resume_from = None,
-        cache_base_dir = None,
-        cache_source = None,
-        extra_metadata = None,
-    ):
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents = True, exist_ok = True)
-        entry_training_calls.append(
-            {
-                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
-                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
-                "cache_source_kind": None if cache_source is None else cache_source.get("cache_kind"),
-                "extra_episode_stage": None
-                if extra_metadata is None
-                else extra_metadata.get("episode", {}).get("stage"),
-            }
-        )
-        return SimpleNamespace(
-            best_policy = LinearStoppingPolicy(weights = np.array([1.0], dtype = np.float32)),
-            artifacts = SimpleNamespace(output_dir = output_dir),
-        )
-
-    def fake_train_exit_policy(
-        config_path = None,
-        *,
-        config = None,
-        output_dir = None,
-        run_id = None,
-        spread_paths = None,
-        formation_spread = None,
-        resume_from = None,
-        cache_base_dir = None,
-        cache_source = None,
-        extra_metadata = None,
-    ):
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents = True, exist_ok = True)
-        exit_training_calls.append(
-            {
-                "cache_base_dir": None if cache_base_dir is None else str(cache_base_dir),
-                "cache_source_stage": None if cache_source is None else cache_source.get("stage"),
-                "cache_source_kind": None if cache_source is None else cache_source.get("cache_kind"),
-                "extra_episode_stage": None
-                if extra_metadata is None
-                else extra_metadata.get("episode", {}).get("stage"),
-            }
-        )
-        return SimpleNamespace(
-            best_policy = LinearStoppingPolicy(weights = np.array([1.0], dtype = np.float32)),
-            artifacts = SimpleNamespace(output_dir = output_dir),
-        )
-
-    monkeypatch.setattr("src.sigstop.backtest.sot.sample_sot_stage_paths", fake_sample_stage_paths)
+    pretrain_calls = _install_fake_pretrained_sot_policies(monkeypatch)
     monkeypatch.setattr("src.sigstop.backtest.sot.build_real_stage_feature_tensor", fake_build_real_stage_feature_tensor)
-    monkeypatch.setattr("src.sigstop.backtest.sot.train_entry_policy", fake_train_entry_policy)
-    monkeypatch.setattr("src.sigstop.backtest.sot.train_exit_policy", fake_train_exit_policy)
 
     config = _toy_config()
     cache_root = Path("runs") / "pytest_artifacts" / f"sot_stage_feature_cache_{uuid.uuid4().hex}"
     config["features"]["artifacts_dir"] = str(cache_root)
-    trading_window = _toy_window(n_days = 3)
+    trading_window = _toy_window(n_days = 4)
     formation_spread = np.array([9.0, 10.0, 11.0, 12.0], dtype = np.float64)
     ou_params = _toy_ou_params()
 
@@ -370,12 +288,13 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
     first_result = run_backtest_engine(
         trading_window,
         first_strategy,
-        engine_config = BacktestEngineConfig(trading_days = 3),
+        engine_config = BacktestEngineConfig(trading_days = 4),
     )
 
     assert [record.action for record in first_result.step_records] == [
         StrategyAction.HOLD,
         StrategyAction.ENTER_LONG_SPREAD,
+        StrategyAction.HOLD,
         StrategyAction.EXIT_LONG_SPREAD,
     ]
     assert len(feature_build_calls) == 2
@@ -392,12 +311,13 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
     second_result = run_backtest_engine(
         trading_window,
         second_strategy,
-        engine_config = BacktestEngineConfig(trading_days = 3),
+        engine_config = BacktestEngineConfig(trading_days = 4),
     )
 
     assert [record.action for record in second_result.step_records] == [
         StrategyAction.HOLD,
         StrategyAction.ENTER_LONG_SPREAD,
+        StrategyAction.HOLD,
         StrategyAction.EXIT_LONG_SPREAD,
     ]
     assert len(feature_build_calls) == 2
@@ -407,32 +327,29 @@ def test_sot_strategy_reuses_cached_stage_features_between_runs(monkeypatch) -> 
     assert second_strategy.exit_stage_history[0].feature_cache_path is not None
     assert second_strategy.entry_stage_history[0].feature_cache_path.exists()
     assert second_strategy.exit_stage_history[0].feature_cache_path.exists()
-    expected_training_cache_root = str((Path.cwd() / "data" / "synthetic" / "gs_ms" / "ou").resolve())
-    assert entry_training_calls == [
+    assert second_strategy.entry_stage_history[0].feature_manifest_path is not None
+    assert second_strategy.exit_stage_history[0].feature_manifest_path is not None
+    assert second_strategy.entry_stage_history[0].feature_manifest_path.exists()
+    assert second_strategy.exit_stage_history[0].feature_manifest_path.exists()
+    assert pretrain_calls["dataset_calls"] == [
         {
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "entry",
-            "cache_source_kind": "sot_runtime_ou_sample",
-            "extra_episode_stage": "entry",
+            "stage": "entry",
+            "n_paths": 3,
+            "horizon": 252,
         },
         {
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "entry",
-            "cache_source_kind": "sot_runtime_ou_sample",
-            "extra_episode_stage": "entry",
-        },
-    ]
-    assert exit_training_calls == [
-        {
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "exit",
-            "cache_source_kind": "sot_runtime_ou_sample",
-            "extra_episode_stage": "exit",
+            "stage": "exit",
+            "n_paths": 3,
+            "horizon": 252,
         },
         {
-            "cache_base_dir": expected_training_cache_root,
-            "cache_source_stage": "exit",
-            "cache_source_kind": "sot_runtime_ou_sample",
-            "extra_episode_stage": "exit",
+            "stage": "entry",
+            "n_paths": 3,
+            "horizon": 252,
+        },
+        {
+            "stage": "exit",
+            "n_paths": 3,
+            "horizon": 252,
         },
     ]
