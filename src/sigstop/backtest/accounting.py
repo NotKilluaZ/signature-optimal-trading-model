@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass, fields
 import json
 from pathlib import Path
 from typing import Any
+import numpy as np
 import pandas as pd
 from src.sigstop.backtest.costs import BacktestCostConfig, build_backtest_cost_config, compute_action_cost
 from src.sigstop.backtest.engine import BacktestEngineResult, BacktestStepRecord, StrategyAction, validate_trading_window
@@ -33,6 +34,15 @@ class TradeLedgerRecord:
     policy_id_exit: str | None
     entry_decision_metadata_json: str | None = None
     exit_decision_metadata_json: str | None = None
+    accounting_model: str = "spread_units"
+    position_units: float | None = None
+    entry_equity: float | None = None
+    exit_equity: float | None = None
+    gross_pnl_capital: float | None = None
+    entry_leg_1_price: float | None = None
+    entry_leg_2_price: float | None = None
+    exit_leg_1_price: float | None = None
+    exit_leg_2_price: float | None = None
 
     # Convert one trade ledger dataclass into dictionary form
     def to_dict(self) -> dict[str, Any]:
@@ -43,6 +53,30 @@ class TradeLedgerRecord:
 class TradeLedgerResult:
     records: list[TradeLedgerRecord]
     trade_ledger: pd.DataFrame
+
+
+@dataclass(frozen = True)
+class PairTradeAccountingSpec:
+    leg_1_symbol: str
+    leg_2_symbol: str
+    beta: float
+    accounting_model: str = "paper_capital_pair"
+    include_transaction_costs: bool = False
+
+    def __post_init__(self) -> None:
+        if not str(self.leg_1_symbol):
+            raise ValueError("leg_1_symbol must be non-empty.")
+        if not str(self.leg_2_symbol):
+            raise ValueError("leg_2_symbol must be non-empty.")
+        if str(self.leg_1_symbol) == str(self.leg_2_symbol):
+            raise ValueError("leg_1_symbol and leg_2_symbol must be different.")
+        if not np.isfinite(float(self.beta)):
+            raise ValueError(f"beta must be finite. Got: {self.beta}")
+        if str(self.accounting_model) != "paper_capital_pair":
+            raise ValueError(
+                "accounting_model must be 'paper_capital_pair'. "
+                f"Got: {self.accounting_model!r}"
+            )
 
 
 # Serialize decision metadata into a stable JSON string
@@ -71,6 +105,8 @@ def build_trade_ledger(
     cost_config: BacktestCostConfig | None = None,
     pair: str | None = None,
     beta: float | None = None,
+    initial_equity: float = 1.0,
+    pair_trade_accounting: PairTradeAccountingSpec | None = None,
 ) -> TradeLedgerResult:
     resolved_cost_config = (
         cost_config
@@ -83,6 +119,7 @@ def build_trade_ledger(
     current_entry_record: BacktestStepRecord | None = None
     latest_position_record: BacktestStepRecord | None = None
     trade_records: list[TradeLedgerRecord] = []
+    current_equity = float(initial_equity)
 
     for step_record in engine_result.step_records:
         if step_record.state_before.value == "LONG_SPREAD":
@@ -111,8 +148,13 @@ def build_trade_ledger(
                     beta = beta,
                     forced_exit = False,
                     forced_exit_reason = None,
+                    processed_window = processed_window,
+                    pair_trade_accounting = pair_trade_accounting,
+                    entry_equity = current_equity,
                 )
             )
+            if pair_trade_accounting is not None:
+                current_equity = float(trade_records[-1].exit_equity)
             current_entry_record = None
             latest_position_record = None
 
@@ -152,6 +194,9 @@ def build_trade_ledger(
                 beta = beta,
                 forced_exit = True,
                 forced_exit_reason = "end_of_horizon",
+                processed_window = processed_window,
+                pair_trade_accounting = pair_trade_accounting,
+                entry_equity = current_equity,
             )
         )
 
@@ -196,6 +241,9 @@ def _build_trade_record(
     beta: float | None,
     forced_exit: bool,
     forced_exit_reason: str | None,
+    processed_window: pd.DataFrame,
+    pair_trade_accounting: PairTradeAccountingSpec | None,
+    entry_equity: float,
 ) -> TradeLedgerRecord:
     entry_metadata = dict(entry_record.decision_metadata)
     resolved_exit_metadata = {} if exit_metadata is None else dict(exit_metadata)
@@ -212,10 +260,12 @@ def _build_trade_record(
         cost_config = cost_config,
         notional_reference = exit_notional_reference,
     )
+    if pair_trade_accounting is not None and not bool(pair_trade_accounting.include_transaction_costs):
+        cost_entry = 0.0
+        cost_exit = 0.0
 
     gross_pnl = float(exit_record.spread - entry_record.spread)
     total_cost = float(cost_entry + cost_exit)
-    net_pnl = float(gross_pnl - total_cost)
     holding_days = int(exit_record.day_index - entry_record.day_index)
 
     if holding_days < 0:
@@ -223,6 +273,52 @@ def _build_trade_record(
             "Trade exit index must be greater than or equal to entry index. "
             f"Got entry_idx={entry_record.day_index}, exit_idx={exit_record.day_index}"
         )
+
+    accounting_model = "spread_units"
+    position_units = None
+    exit_equity = None
+    gross_pnl_capital = None
+    entry_leg_1_price = None
+    entry_leg_2_price = None
+    exit_leg_1_price = None
+    exit_leg_2_price = None
+    net_pnl = float(gross_pnl - total_cost)
+
+    if pair_trade_accounting is not None:
+        accounting_model = str(pair_trade_accounting.accounting_model)
+        required_columns = {
+            str(pair_trade_accounting.leg_1_symbol),
+            str(pair_trade_accounting.leg_2_symbol),
+        }
+        missing = required_columns.difference(processed_window.columns)
+        if missing:
+            raise ValueError(
+                "Trading window is missing required raw-price columns for paper pair accounting: "
+                f"{sorted(missing)}"
+            )
+
+        entry_row = processed_window.iloc[int(entry_record.day_index)]
+        exit_row = processed_window.iloc[int(exit_record.day_index)]
+        entry_leg_1_price = float(entry_row[str(pair_trade_accounting.leg_1_symbol)])
+        entry_leg_2_price = float(entry_row[str(pair_trade_accounting.leg_2_symbol)])
+        exit_leg_1_price = float(exit_row[str(pair_trade_accounting.leg_1_symbol)])
+        exit_leg_2_price = float(exit_row[str(pair_trade_accounting.leg_2_symbol)])
+        if entry_leg_1_price <= 0.0:
+            raise ValueError(
+                "Paper pair accounting requires a positive entry leg_1 price. "
+                f"Got: {entry_leg_1_price}"
+            )
+
+        entry_spread_raw = float(
+            entry_leg_1_price - float(pair_trade_accounting.beta) * entry_leg_2_price
+        )
+        exit_spread_raw = float(
+            exit_leg_1_price - float(pair_trade_accounting.beta) * exit_leg_2_price
+        )
+        position_units = float(entry_equity / entry_leg_1_price)
+        gross_pnl_capital = float(position_units * (exit_spread_raw - entry_spread_raw))
+        net_pnl = float(gross_pnl_capital - total_cost)
+        exit_equity = float(entry_equity + net_pnl)
 
     return TradeLedgerRecord(
         trade_id = int(trade_id),
@@ -248,6 +344,15 @@ def _build_trade_record(
         policy_id_exit = _coerce_optional_string(resolved_exit_metadata.get("policy_id")),
         entry_decision_metadata_json = _serialize_metadata(entry_metadata),
         exit_decision_metadata_json = _serialize_metadata(resolved_exit_metadata),
+        accounting_model = accounting_model,
+        position_units = position_units,
+        entry_equity = None if pair_trade_accounting is None else float(entry_equity),
+        exit_equity = exit_equity,
+        gross_pnl_capital = gross_pnl_capital,
+        entry_leg_1_price = entry_leg_1_price,
+        entry_leg_2_price = entry_leg_2_price,
+        exit_leg_1_price = exit_leg_1_price,
+        exit_leg_2_price = exit_leg_2_price,
     )
 
 

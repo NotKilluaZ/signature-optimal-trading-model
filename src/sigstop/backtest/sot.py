@@ -14,15 +14,21 @@ from src.sigstop.features.feature_builder import FeatureBuildResult, build_featu
 from src.sigstop.features.manifest import build_feature_manifest, save_manifest
 from src.sigstop.features.scaling import fit_zscore_scaler, scaler_to_dict
 from src.sigstop.generators.cache import build_ou_fit_paths
+from src.sigstop.generators.ou_fit import fit_ou_generator_params
 from src.sigstop.generators.ou_sim import sample_ou_paths
 from src.sigstop.generators.spec import build_default_sample_request, build_generator_context
 from src.sigstop.generators.types import OUGeneratorParams, OUSampleRequest
 from src.sigstop.paths import ROOT_DIR, RUNS_DIR, ensure_directories
 from src.sigstop.stopping.policy import score_signature_features
 from src.sigstop.stopping.stop_rule import apply_deterministic_stop_rule
-from src.sigstop.train.train_entry import train_entry_policy
-from src.sigstop.train.train_exit import train_exit_policy
-from src.sigstop.train.trainer import build_default_run_id
+from src.sigstop.train.train_entry import build_entry_training_data, train_entry_policy
+from src.sigstop.train.train_exit import build_exit_training_data, train_exit_policy
+from src.sigstop.train.trainer import (
+    TrainingResult,
+    build_default_run_id,
+    build_training_config_from_dict,
+    train_linear_stopping_policy,
+)
 
 
 @dataclass
@@ -43,6 +49,7 @@ class SOTStagePlan:
     trigger_row_index: int | None
     trigger_date: str | None
     trigger_spread: float | None
+    plan_start_index: int = 0
     feature_spec: dict[str, Any] = field(default_factory = dict)
     feature_cache_key: str | None = None
     feature_cache_path: Path | None = None
@@ -51,7 +58,7 @@ class SOTStagePlan:
 
     # Get the latest prefix index available at the current day
     def latest_available_prefix_index(self, current_index: int) -> int | None:
-        relative_index = int(current_index - self.state_start_index)
+        relative_index = int(current_index - self.plan_start_index)
         if relative_index < 0 or self.prefix_ends.size == 0:
             return None
 
@@ -275,8 +282,9 @@ def sample_sot_stage_paths(
     *,
     x0: float,
     horizon: int,
+    seed: int | None = None,
 ) -> tuple[np.ndarray, OUSampleRequest]:
-    default_request = build_default_sample_request(x0 = x0, config = config)
+    default_request = build_default_sample_request(x0 = x0, config = config, seed = seed)
     request = OUSampleRequest(
         x0 = float(x0),
         horizon = int(horizon),
@@ -346,6 +354,19 @@ class SOTBacktestStrategy(BacktestStrategy):
         self.cache_episode_features = bool(
             _get_config_value(self.config, ["sot", "cache_episode_features"], True)
         )
+        self.rolling_refit_enabled = bool(
+            _get_config_value(self.config, ["sot", "rolling_refit", "enabled"], False)
+        )
+        self.rolling_refit_window = int(
+            _get_config_value(self.config, ["sot", "rolling_refit", "window"], 252)
+        )
+        self.ou_fit_dt = float(_get_config_value(self.config, ["generator", "fit", "dt"], 1.0))
+        self.ou_fit_var_floor = float(
+            _get_config_value(self.config, ["generator", "fit", "var_floor"], 1e-12)
+        )
+        self.ou_fit_method = str(
+            _get_config_value(self.config, ["generator", "fit", "method"], "transition_mle")
+        )
         self.feature_cache_root = resolve_backtest_feature_cache_root(self.config)
         self.training_cache_root = resolve_sot_training_cache_root(self.config)
 
@@ -354,11 +375,121 @@ class SOTBacktestStrategy(BacktestStrategy):
         self.entry_stage_history: list[SOTStagePlan] = []
         self.exit_stage_history: list[SOTStagePlan] = []
 
+        self.pretrain_horizon = int(
+            _get_config_value(
+                self.config,
+                ["sot", "pretrain_horizon"],
+                _get_config_value(
+                    self.config,
+                    ["training", "horizon_days"],
+                    _get_config_value(self.config, ["sot", "episode_horizon"], 252),
+                ),
+            )
+        )
+        if self.pretrain_horizon <= 0:
+            self.pretrain_horizon = 252
+        self.pretrain_x0_count = int(
+            _get_config_value(self.config, ["sot", "pretrain_x0_count"], 16)
+        )
+        self.pretrained_entry_result: TrainingResult | None = None
+        self.pretrained_exit_result: TrainingResult | None = None
+        self._pretrain_global_policies()
+
+    # Sample a single-x0 bank of synthetic OU paths used to pretrain a policy
+    def _sample_diversified_training_paths(self, *, stage: str) -> np.ndarray:
+        formation = np.asarray(self.formation_spread, dtype = np.float64)
+        x0 = float(formation[-1]) if formation.size > 0 else float(self.ou_params.theta)
+
+        n_paths = int(
+            _get_config_value(
+                self.config,
+                ["sot", "ou_samples_M"],
+                _get_config_value(self.config, ["generator", "sample", "n_paths"], 100),
+            )
+        )
+        n_paths = max(n_paths, 1)
+
+        base_seed = int(_get_config_value(self.config, ["repro", "seed"], 42))
+        slot_seed = int(
+            hashlib.sha256(f"{base_seed}:pretrain:{stage}".encode()).hexdigest()[:8], 16
+        ) % (2**31)
+        default_request = build_default_sample_request(
+            x0 = x0,
+            config = self.config,
+            seed = slot_seed,
+        )
+        request = OUSampleRequest(
+            x0 = x0,
+            horizon = int(self.pretrain_horizon),
+            n_paths = n_paths,
+            seed = slot_seed,
+            dt = float(default_request.dt),
+            dtype = str(default_request.dtype),
+            device = str(default_request.device),
+            include_innovations = False,
+        )
+        batch = sample_ou_paths(self.ou_params, request)
+        return np.asarray(batch.paths, dtype = np.float64)
+
+    # Pretrain one global entry policy and one global exit policy
+    def _pretrain_global_policies(self) -> None:
+        training_config = build_training_config_from_dict(self.config)
+
+        entry_paths = self._sample_diversified_training_paths(stage = "entry")
+        entry_data = build_entry_training_data(entry_paths, self.formation_spread, self.config)
+        entry_output_dir = self.output_root / "pretrain" / "entry"
+        self.pretrained_entry_result = train_linear_stopping_policy(
+            entry_data.features,
+            entry_data.payoffs,
+            training_config,
+            output_dir = entry_output_dir,
+            stage = "entry",
+            run_id = self.run_id,
+            extra_manifest_data = {
+                "source": "pretrain_diversified_x0",
+                "horizon": int(self.pretrain_horizon),
+                "n_paths": int(entry_paths.shape[0]),
+                "feature_spec": entry_data.feature_spec,
+                "scaler_spec": entry_data.scaler_spec,
+            },
+        )
+
+        exit_paths = self._sample_diversified_training_paths(stage = "exit")
+        exit_data = build_exit_training_data(exit_paths, self.formation_spread, self.config)
+        exit_output_dir = self.output_root / "pretrain" / "exit"
+        self.pretrained_exit_result = train_linear_stopping_policy(
+            exit_data.features,
+            exit_data.payoffs,
+            training_config,
+            output_dir = exit_output_dir,
+            stage = "exit",
+            run_id = self.run_id,
+            extra_manifest_data = {
+                "source": "pretrain_diversified_x0",
+                "horizon": int(self.pretrain_horizon),
+                "n_paths": int(exit_paths.shape[0]),
+                "feature_spec": exit_data.feature_spec,
+                "scaler_spec": exit_data.scaler_spec,
+            },
+        )
+
+    # Return True when the cached plan has aged past its episode horizon
+    def _plan_is_stale(self, plan: SOTStagePlan | None, context: BacktestDayContext) -> bool:
+        if plan is None:
+            return True
+        if plan.state_start_index != context.state_start_index:
+            return True
+        if plan.horizon <= 0:
+            return True
+        if int(context.current_index) > int(plan.plan_start_index) + int(plan.horizon):
+            return True
+        return False
+
     # Evaluate the SOT entry stage while flat
     def on_flat_day(self, context: BacktestDayContext) -> StrategyDecision:
         self._active_exit_plan = None
         plan = self._active_entry_plan
-        if plan is None or plan.state_start_index != context.state_start_index:
+        if self._plan_is_stale(plan, context):
             plan = self._build_stage_plan("entry", context)
             self._active_entry_plan = plan
             self.entry_stage_history.append(plan)
@@ -375,7 +506,7 @@ class SOTBacktestStrategy(BacktestStrategy):
 
         self._active_entry_plan = None
         plan = self._active_exit_plan
-        if plan is None or plan.state_start_index != context.state_start_index:
+        if self._plan_is_stale(plan, context):
             plan = self._build_stage_plan("exit", context)
             self._active_exit_plan = plan
             self.exit_stage_history.append(plan)
@@ -385,6 +516,44 @@ class SOTBacktestStrategy(BacktestStrategy):
             self._active_exit_plan = None
         return decision
 
+    # Build a rolling refit history ending just before the given stage start,
+    # drawn from the pre-trading formation artifact plus trading days already
+    # observed in this backtest. Returns None when rolling refit is disabled
+    def _build_rolling_history(
+        self,
+        *,
+        trading_window: pd.DataFrame,
+        state_start_index: int,
+    ) -> np.ndarray | None:
+        if not self.rolling_refit_enabled:
+            return None
+        trading_prefix = (
+            trading_window["spread"].to_numpy(dtype = np.float64)[:state_start_index]
+            if state_start_index > 0
+            else np.empty(0, dtype = np.float64)
+        )
+        combined = np.concatenate([self.formation_spread, trading_prefix])
+        window = int(self.rolling_refit_window)
+        if window > 0 and combined.size > window:
+            combined = combined[-window:]
+        return combined
+
+    # Refit the OU generator parameters on a rolling history, falling back to
+    # the pre-trading OU fit if the refit fails or the history is too short.
+    def _refit_ou_params(self, history: np.ndarray) -> OUGeneratorParams:
+        if history.size < 3:
+            return self.ou_params
+        try:
+            params, _ = fit_ou_generator_params(
+                pd.Series(history),
+                dt = self.ou_fit_dt,
+                var_floor = self.ou_fit_var_floor,
+                method = self.ou_fit_method,
+            )
+        except (ValueError, RuntimeError):
+            return self.ou_params
+        return params
+
     # Reuse or build the cached real-path feature tensor for one SOT stage
     def _load_or_build_stage_feature_result(
         self,
@@ -392,6 +561,7 @@ class SOTBacktestStrategy(BacktestStrategy):
         stage: str,
         stage_start_index: int,
         spread_segment: np.ndarray,
+        formation_spread: np.ndarray,
     ) -> tuple[FeatureBuildResult, str | None, Path | None, Path | None, bool]:
         feature_settings = build_real_stage_feature_settings(self.config)
         cache_inputs = build_backtest_feature_cache_inputs(
@@ -399,7 +569,7 @@ class SOTBacktestStrategy(BacktestStrategy):
             stage = stage,
             state_start_index = stage_start_index,
             spread_segment = spread_segment,
-            formation_spread = self.formation_spread,
+            formation_spread = formation_spread,
             feature_settings = feature_settings,
         )
         cache_key = build_backtest_feature_cache_key(cache_inputs)
@@ -421,12 +591,12 @@ class SOTBacktestStrategy(BacktestStrategy):
 
         feature_result = build_real_stage_feature_tensor(
             spread_segment,
-            self.formation_spread,
+            formation_spread,
             self.config,
         )
 
         if self.cache_episode_features:
-            scaler = fit_zscore_scaler(self.formation_spread)
+            scaler = fit_zscore_scaler(formation_spread)
             feature_manifest = build_feature_manifest(
                 name = f"{self.name}_{stage}_stage_features",
                 feature_spec = dict(feature_result.feature_spec),
@@ -468,21 +638,27 @@ class SOTBacktestStrategy(BacktestStrategy):
         stage: str,
         context: BacktestDayContext,
     ) -> SOTStagePlan:
-        stage_start_index = int(context.state_start_index)
-        stage_window = context.trading_window.iloc[stage_start_index:].reset_index(drop = True)
+        state_start_index = int(context.state_start_index)
+        plan_start_index = int(context.current_index)
+        episode_horizon_cap = int(_get_config_value(self.config, ["sot", "episode_horizon"], 0))
+        remaining = int(len(context.trading_window) - 1 - plan_start_index)
+        horizon = remaining
+        if episode_horizon_cap > 0:
+            horizon = min(horizon, episode_horizon_cap)
+        stage_window = context.trading_window.iloc[
+            plan_start_index : plan_start_index + horizon + 1
+        ].reset_index(drop = True)
         initial_spread = (
-            float(context.open_position.entry_spread)
-            if stage == "exit" and context.open_position is not None
-            else float(stage_window.iloc[0]["spread"])
+            float(stage_window.iloc[0]["spread"]) if len(stage_window) > 0 else 0.0
         )
         state_start_date = (
-            _serialize_date(context.trading_window.iloc[stage_start_index]["date"])
-            if "date" in context.trading_window.columns
+            _serialize_date(context.trading_window.iloc[plan_start_index]["date"])
+            if "date" in context.trading_window.columns and plan_start_index < len(context.trading_window)
             else None
         )
-        horizon = int(len(stage_window) - 1)
-        output_dir = self.output_root / stage / f"{stage}_start_{stage_start_index:04d}"
-        policy_id = f"sot_{stage}_{stage_start_index:04d}"
+        stage_start_index = state_start_index
+        output_dir = self.output_root / stage / f"{stage}_start_{plan_start_index:04d}"
+        policy_id = f"sot_{stage}_{plan_start_index:04d}"
 
         if len(stage_window) < 2 or horizon <= 0:
             return SOTStagePlan(
@@ -502,55 +678,19 @@ class SOTBacktestStrategy(BacktestStrategy):
                 trigger_row_index = None,
                 trigger_date = None,
                 trigger_spread = None,
+                plan_start_index = plan_start_index,
             )
 
-        synthetic_paths, sample_request = sample_sot_stage_paths(
-            self.config,
-            self.ou_params,
-            x0 = initial_spread,
-            horizon = horizon,
-        )
-        training_cache_source = build_sot_stage_training_cache_source(
-            stage = stage,
-            sample_request = sample_request,
-            ou_params = self.ou_params,
-            formation_spread = self.formation_spread,
-        )
-        training_extra_metadata = {
-            "source": training_cache_source,
-            "episode": {
-                "stage": stage,
-                "state_start_index": stage_start_index,
-                "state_start_date": state_start_date,
-                "initial_spread": float(initial_spread),
-                "horizon": int(horizon),
-            },
-        }
+        stage_formation_spread = self.formation_spread
 
         if stage == "entry":
-            training_result = train_entry_policy(
-                config = self.config,
-                output_dir = output_dir,
-                run_id = self.run_id,
-                spread_paths = synthetic_paths,
-                formation_spread = self.formation_spread,
-                cache_base_dir = self.training_cache_root,
-                cache_source = training_cache_source,
-                extra_metadata = training_extra_metadata,
-            )
+            training_result = self.pretrained_entry_result
         elif stage == "exit":
-            training_result = train_exit_policy(
-                config = self.config,
-                output_dir = output_dir,
-                run_id = self.run_id,
-                spread_paths = synthetic_paths,
-                formation_spread = self.formation_spread,
-                cache_base_dir = self.training_cache_root,
-                cache_source = training_cache_source,
-                extra_metadata = training_extra_metadata,
-            )
+            training_result = self.pretrained_exit_result
         else:
             raise ValueError(f"Unsupported SOT stage: {stage!r}")
+        if training_result is None:
+            raise RuntimeError(f"Pretrained {stage} policy is not available.")
 
         (
             real_stage_result,
@@ -560,8 +700,9 @@ class SOTBacktestStrategy(BacktestStrategy):
             feature_cache_hit,
         ) = self._load_or_build_stage_feature_result(
             stage = stage,
-            stage_start_index = stage_start_index,
+            stage_start_index = plan_start_index,
             spread_segment = stage_window["spread"].to_numpy(dtype = np.float64),
+            formation_spread = stage_formation_spread,
         )
         if real_stage_result.features.size == 0 or real_stage_result.prefix_ends.size == 0:
             return SOTStagePlan(
@@ -581,6 +722,7 @@ class SOTBacktestStrategy(BacktestStrategy):
                 trigger_row_index = None,
                 trigger_date = None,
                 trigger_spread = None,
+                plan_start_index = plan_start_index,
                 feature_spec = dict(real_stage_result.feature_spec),
                 feature_cache_key = feature_cache_key,
                 feature_cache_path = feature_cache_path,
@@ -598,7 +740,7 @@ class SOTBacktestStrategy(BacktestStrategy):
         trigger_date = None
         trigger_spread = None
         if stop_rule.stop_index is not None:
-            trigger_row_index = int(stage_start_index + real_stage_result.prefix_ends[stop_rule.stop_index])
+            trigger_row_index = int(plan_start_index + real_stage_result.prefix_ends[stop_rule.stop_index])
             trigger_date = (
                 _serialize_date(context.trading_window.iloc[trigger_row_index]["date"])
                 if "date" in context.trading_window.columns
@@ -623,6 +765,7 @@ class SOTBacktestStrategy(BacktestStrategy):
             trigger_row_index = trigger_row_index,
             trigger_date = trigger_date,
             trigger_spread = trigger_spread,
+            plan_start_index = plan_start_index,
             feature_spec = dict(real_stage_result.feature_spec),
             feature_cache_key = feature_cache_key,
             feature_cache_path = feature_cache_path,

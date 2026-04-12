@@ -102,6 +102,8 @@ def _toy_window(n_days: int = 6) -> pd.DataFrame:
         {
             "date": pd.date_range("2022-01-03", periods = n_days, freq = "B"),
             "spread": [10.0, 10.0, 10.0, 9.0, 10.0, 10.0][:n_days],
+            "GS": [20.0, 20.0, 20.0, 19.0, 20.0, 20.0][:n_days],
+            "MS": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0][:n_days],
         }
     )
 

@@ -37,9 +37,14 @@ sot:
   retrain_cadence: "per_trade"
   k: 0.05
   mu: 20.0
-  ou_samples_M: 2000
+  ou_samples_M: 100
   feature_depth_N: 4
+  episode_horizon: 60
+  pretrain_horizon: 60
   cache_episode_features: true
+  rolling_refit:
+    enabled: false
+    window: 60
 
 baseline:
   ma_window: 100
@@ -100,6 +105,7 @@ features:
     dtype: "float32"
     device: "cpu"
     basepoint: false
+    path_batch_size: 100
   augmentation:
     add_time: true
     time_representation: "index_0_1"
@@ -124,11 +130,11 @@ stopping:
   payoff:
     entry:
       r: 0.0
-      c: 0.0
+      c: 0.001
       formula: "exp(-r t) * (-X - c)"
     exit:
       r_hat: 0.0
-      c_hat: 0.0
+      c_hat: 0.001
       formula: "exp(-r_hat t) * (X - c_hat)"
 
 training:
@@ -146,10 +152,10 @@ training:
     eps: 1.0e-8
     weight_decay: 0.0
   schedule:
-    max_epochs: 200
+    max_epochs: 100
     early_stopping:
       enabled: true
-      patience: 20
+      patience: 30
       min_delta: 1.0e-4
   regularization:
     grad_clip:
@@ -177,7 +183,7 @@ generator:
 
   sample:
     horizon: 252
-    n_paths: 2000
+    n_paths: 5000
     dtype: "float64"
     device: "cpu"
     include_innovations: false

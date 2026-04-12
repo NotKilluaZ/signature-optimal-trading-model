@@ -92,7 +92,15 @@ def validate_trade_accounting_identities(
         cost_entry = float(row.cost_entry)
         cost_exit = float(row.cost_exit)
         total_cost = float(row.total_cost)
+        accounting_model = str(getattr(row, "accounting_model", "spread_units"))
         gross_pnl = float(row.gross_pnl_spread)
+        if accounting_model == "paper_capital_pair":
+            gross_pnl_capital = getattr(row, "gross_pnl_capital", None)
+            if gross_pnl_capital is None or pd.isna(gross_pnl_capital):
+                raise ValueError(
+                    "paper_capital_pair trades must include gross_pnl_capital in the trade ledger."
+                )
+            gross_pnl = float(gross_pnl_capital)
         net_pnl = float(row.net_pnl)
 
         if cost_entry < 0.0 or cost_exit < 0.0 or total_cost < 0.0:
@@ -104,9 +112,21 @@ def validate_trade_accounting_identities(
             )
         if not np.isclose(net_pnl, gross_pnl - total_cost, atol = atol, rtol = 0.0):
             raise ValueError(
-                "net_pnl must equal gross_pnl_spread - total_cost. "
-                f"Got net_pnl={net_pnl}, gross_pnl_spread={gross_pnl}, total_cost={total_cost}"
+                "net_pnl must equal the configured gross PnL measure minus total_cost. "
+                f"Got net_pnl={net_pnl}, gross_pnl={gross_pnl}, total_cost={total_cost}"
             )
+        if accounting_model == "paper_capital_pair":
+            entry_equity = getattr(row, "entry_equity", None)
+            exit_equity = getattr(row, "exit_equity", None)
+            if entry_equity is None or exit_equity is None or pd.isna(entry_equity) or pd.isna(exit_equity):
+                raise ValueError(
+                    "paper_capital_pair trades must include entry_equity and exit_equity in the trade ledger."
+                )
+            if not np.isclose(net_pnl, float(exit_equity) - float(entry_equity), atol = atol, rtol = 0.0):
+                raise ValueError(
+                    "paper_capital_pair net_pnl must equal exit_equity - entry_equity. "
+                    f"Got net_pnl={net_pnl}, entry_equity={entry_equity}, exit_equity={exit_equity}"
+                )
 
 
 # Validate that baseline indicators use the intended prior-only lookback window

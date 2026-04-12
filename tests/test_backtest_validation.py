@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.sigstop.backtest.accounting import build_trade_ledger
+from src.sigstop.backtest.accounting import PairTradeAccountingSpec, build_trade_ledger
 from src.sigstop.backtest.baseline import BaselineStrategyConfig, build_baseline_indicator_frame
 from src.sigstop.backtest.costs import BacktestCostConfig
 from src.sigstop.backtest.engine import (
@@ -259,5 +259,38 @@ def test_validate_trade_accounting_identities_detects_broken_net_pnl() -> None:
         }
     )
 
-    with pytest.raises(ValueError, match = "net_pnl must equal gross_pnl_spread - total_cost"):
+    with pytest.raises(ValueError, match = "net_pnl must equal the configured gross PnL measure minus total_cost"):
         validate_trade_accounting_identities(broken_trade_ledger)
+
+
+def test_validate_trade_accounting_identities_accepts_paper_capital_pair_trades() -> None:
+    trading_window = pd.DataFrame(
+        {
+            "date": pd.date_range("2022-01-03", periods = 5, freq = "B"),
+            "spread": [50.0, 50.0, 51.0, 54.0, 54.0],
+            "GS": [100.0, 100.0, 102.0, 105.0, 105.0],
+            "MS": [50.0, 50.0, 51.0, 51.0, 51.0],
+        }
+    )
+    engine_result = run_backtest_engine(
+        trading_window[["date", "spread"]],
+        OneRoundTripStrategy(),
+        engine_config = BacktestEngineConfig(trading_days = 5),
+    )
+    ledger_result = build_trade_ledger(
+        engine_result,
+        trading_window,
+        cost_config = BacktestCostConfig(
+            fixed_per_action = 0.0,
+            proportional = 0.0,
+            slippage_bps = 0.0,
+            model = "spread_proxy",
+        ),
+        pair_trade_accounting = PairTradeAccountingSpec(
+            leg_1_symbol = "GS",
+            leg_2_symbol = "MS",
+            beta = 1.0,
+        ),
+    )
+
+    validate_trade_accounting_identities(ledger_result.trade_ledger)

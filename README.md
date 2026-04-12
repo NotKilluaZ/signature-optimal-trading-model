@@ -14,7 +14,7 @@ The repo is intentionally Git-clean by default: raw data, cached features, model
 
 - Pair: Goldman Sachs (`GS`) and Morgan Stanley (`MS`)
 - Pipeline: download data -> align -> split -> choose spread orientation/beta -> fit OU simulator -> train stopping policies -> backtest
-- Reference local run: SOT total return `22.39%` on `5` trades vs baseline `5.24%` on `4` trades
+- Reference local run: SOT total return `5.93%` on `5` trades vs baseline `2.04%` on `4` trades
 - Scope: research prototype only, not investment advice
 
 More detail lives in [Results.md](Results.md).
@@ -77,8 +77,10 @@ The current release docs summarize a corrected normalized-spread backtest on the
 
 | Strategy | Trades | Avg holding days | Sharpe | Max drawdown | Total net PnL | Total return |
 |    ---   |  ---:  |       ---:       |  ---:  |     ---:     |      ---:     |     ---:     |
-|    SOT   |   5    |       24.4       | 1.298  |    -0.044    |     0.2239    |     22.39%   |
-| Baseline |   4    |       6.75       | 1.820  |     0.000    |     0.0524    |      5.24%   |
+|    SOT   |   5    |       36.2       | 0.464  |    -0.146    |     0.0593    |      5.93%   |
+| Baseline |   4    |       6.75       | 0.265  |    -0.099    |     0.0204    |      2.04%   |
+
+The baseline figures below use paper-style capital-based pair accounting rather than the older spread-unit equity approximation. Under that accounting, SOT finishes ahead on both total return and Sharpe in this reference run.
 
 Key run facts from the same reference run:
 
@@ -87,6 +89,7 @@ Key run facts from the same reference run:
 - Price basis: normalized full aligned history before beta search and spread construction
 - Selected spread orientation: `GS_minus_beta_MS`
 - Selected hedge ratio (`beta`): `0.862099`
+- Baseline accounting: paper-style capital returns from position-sized GS/MS pair trades
 - Signature depth: `4`
 - Deterministic threshold: `k = 0.05`, `mu = 20.0`
 

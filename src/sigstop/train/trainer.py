@@ -196,7 +196,9 @@ def build_default_stage_output_dir(stage: str, *, run_id: str | None = None) -> 
 def _coerce_batched_payoff_process(
     payoffs: np.ndarray | list[float] | list[list[float]],
 ) -> np.ndarray:
-    x = np.asarray(payoffs, dtype = float)
+    x = np.asarray(payoffs)
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
     if x.ndim == 1:
         x = x[None, :]
     elif x.ndim != 2:

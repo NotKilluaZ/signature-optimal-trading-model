@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 import pandas as pd
+from src.sigstop.backtest.accounting import PairTradeAccountingSpec
 from src.sigstop.backtest.engine import validate_trading_window
 
 
@@ -12,6 +13,7 @@ class BacktestMetricsConfig:
     rf_rate_daily: float = 0.0
     annualization_factor: int = 252
     initial_equity: float = 1.0
+    sharpe_annualization_factor: int = 1
 
     # Validate metrics config values after initialization
     def __post_init__(self) -> None:
@@ -23,6 +25,10 @@ class BacktestMetricsConfig:
             )
         if not np.isfinite(float(self.initial_equity)):
             raise ValueError(f"initial_equity must be finite. Got: {self.initial_equity}")
+        if int(self.sharpe_annualization_factor) <= 0:
+            raise ValueError(
+                f"sharpe_annualization_factor must be positive. Got: {self.sharpe_annualization_factor}"
+            )
 
 
 @dataclass(frozen = True)
@@ -86,6 +92,7 @@ def build_equity_curve(
     *,
     strategy: str | None = None,
     initial_equity: float = 1.0,
+    pair_trade_accounting: PairTradeAccountingSpec | None = None,
 ) -> pd.DataFrame:
     resolved_window = validate_trading_window(trading_window)
     resolved_trade_ledger = _normalize_trade_ledger(trade_ledger)
@@ -103,19 +110,49 @@ def build_equity_curve(
             resolved_trade_ledger["exit_idx"] >= len(processed_window)
         ).any():
             raise ValueError("Trade ledger contains exit_idx values outside the trading window.")
+        if (resolved_trade_ledger["entry_idx"] < 0).any() or (
+            resolved_trade_ledger["entry_idx"] >= len(processed_window)
+        ).any():
+            raise ValueError("Trade ledger contains entry_idx values outside the trading window.")
 
-        by_exit_idx = resolved_trade_ledger.groupby("exit_idx", sort = True)
-        equity_curve.loc[by_exit_idx["net_pnl"].sum().index, "daily_net_pnl"] = (
-            by_exit_idx["net_pnl"].sum().to_numpy(dtype = np.float64)
-        )
-        equity_curve.loc[by_exit_idx.size().index, "daily_trade_count"] = (
-            by_exit_idx.size().to_numpy(dtype = np.int32)
-        )
-        if "forced_exit" in resolved_trade_ledger.columns:
-            forced_by_exit_idx = by_exit_idx["forced_exit"].sum()
-            equity_curve.loc[forced_by_exit_idx.index, "daily_forced_exit_count"] = (
-                forced_by_exit_idx.to_numpy(dtype = np.int32)
+        # Mark-to-market: distribute each trade's PnL across the days the position is open,
+        # and book entry/exit costs on their respective execution days. For the baseline paper
+        # parity mode we scale the pair spread by a fixed position size chosen at entry from
+        # the then-current equity; otherwise we keep the legacy 1-spread-unit accounting.
+        spread_values = (
+            _resolve_pair_spread_values(
+                processed_window,
+                pair_trade_accounting = pair_trade_accounting,
             )
+            if pair_trade_accounting is not None
+            else processed_window["spread"].to_numpy(dtype = np.float64)
+        )
+        daily_pnl = np.zeros(len(processed_window), dtype = np.float64)
+        daily_trades = np.zeros(len(processed_window), dtype = np.int32)
+        daily_forced = np.zeros(len(processed_window), dtype = np.int32)
+
+        for trade in resolved_trade_ledger.itertuples(index = False):
+            entry_idx = int(trade.entry_idx)
+            exit_idx = int(trade.exit_idx)
+            position_units = 1.0
+            if pair_trade_accounting is not None:
+                position_units = float(getattr(trade, "position_units", np.nan))
+                if not np.isfinite(position_units):
+                    raise ValueError(
+                        "Pair-trade equity accounting requires finite 'position_units' in the trade ledger."
+                    )
+            if exit_idx > entry_idx:
+                segment = spread_values[entry_idx + 1 : exit_idx + 1] - spread_values[entry_idx : exit_idx]
+                daily_pnl[entry_idx + 1 : exit_idx + 1] += position_units * segment
+            daily_pnl[entry_idx] -= float(trade.cost_entry)
+            daily_pnl[exit_idx] -= float(trade.cost_exit)
+            daily_trades[exit_idx] += 1
+            if "forced_exit" in resolved_trade_ledger.columns and bool(getattr(trade, "forced_exit", False)):
+                daily_forced[exit_idx] += 1
+
+        equity_curve["daily_net_pnl"] = daily_pnl
+        equity_curve["daily_trade_count"] = daily_trades
+        equity_curve["daily_forced_exit_count"] = daily_forced
 
     equity_curve["cumulative_net_pnl"] = equity_curve["daily_net_pnl"].cumsum()
     equity_curve["equity"] = float(initial_equity) + equity_curve["cumulative_net_pnl"]
@@ -124,6 +161,29 @@ def build_equity_curve(
     equity_curve["running_peak"] = equity_curve["equity"].cummax()
     equity_curve["drawdown"] = equity_curve["equity"] / equity_curve["running_peak"] - 1.0
     return equity_curve
+
+
+def _resolve_pair_spread_values(
+    trading_window: pd.DataFrame,
+    *,
+    pair_trade_accounting: PairTradeAccountingSpec,
+) -> np.ndarray:
+    required_columns = {
+        str(pair_trade_accounting.leg_1_symbol),
+        str(pair_trade_accounting.leg_2_symbol),
+    }
+    missing = required_columns.difference(trading_window.columns)
+    if missing:
+        raise ValueError(
+            "Trading window is missing required raw-price columns for paper pair accounting: "
+            f"{sorted(missing)}"
+        )
+
+    leg_1 = trading_window[str(pair_trade_accounting.leg_1_symbol)].to_numpy(dtype = np.float64)
+    leg_2 = trading_window[str(pair_trade_accounting.leg_2_symbol)].to_numpy(dtype = np.float64)
+    if not np.all(np.isfinite(leg_1)) or not np.all(np.isfinite(leg_2)):
+        raise ValueError("Paper pair accounting requires finite raw-price columns in the trading window.")
+    return leg_1 - float(pair_trade_accounting.beta) * leg_2
 
 
 # Compute the annualized Sharpe ratio from daily returns

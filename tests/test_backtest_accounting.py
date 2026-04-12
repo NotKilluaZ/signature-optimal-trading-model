@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.sigstop.backtest.accounting import build_trade_ledger, save_trade_ledger
+from src.sigstop.backtest.accounting import PairTradeAccountingSpec, build_trade_ledger, save_trade_ledger
 from src.sigstop.backtest.costs import BacktestCostConfig, build_backtest_cost_config, compute_action_cost
 from src.sigstop.backtest.engine import (
     BacktestEngineConfig,
@@ -158,6 +158,47 @@ def test_trade_ledger_force_closes_terminal_open_position_and_reuses_latest_exit
         "runs/pytest_artifacts/backtest_accounting_forced_exit/trades.csv",
     )
     assert output_path.exists()
+
+
+def test_trade_ledger_supports_paper_capital_pair_accounting() -> None:
+    trading_window = pd.DataFrame(
+        {
+            "date": pd.date_range("2022-01-03", periods = 5, freq = "B"),
+            "spread": [50.0, 50.0, 51.0, 54.0, 54.0],
+            "GS": [100.0, 100.0, 102.0, 105.0, 105.0],
+            "MS": [50.0, 50.0, 51.0, 51.0, 51.0],
+        }
+    )
+    engine_result = run_backtest_engine(
+        trading_window[["date", "spread"]],
+        OneRoundTripStrategy(),
+        engine_config = BacktestEngineConfig(trading_days = 5, execution_price = "close"),
+    )
+    ledger_result = build_trade_ledger(
+        engine_result,
+        trading_window,
+        cost_config = BacktestCostConfig(
+            fixed_per_action = 0.0,
+            proportional = 0.0,
+            slippage_bps = 0.0,
+            model = "spread_proxy",
+        ),
+        pair_trade_accounting = PairTradeAccountingSpec(
+            leg_1_symbol = "GS",
+            leg_2_symbol = "MS",
+            beta = 1.0,
+        ),
+    )
+
+    assert len(ledger_result.records) == 1
+    record = ledger_result.records[0]
+    assert record.accounting_model == "paper_capital_pair"
+    assert record.position_units == pytest.approx(0.01)
+    assert record.entry_equity == pytest.approx(1.0)
+    assert record.exit_equity == pytest.approx(1.04)
+    assert record.gross_pnl_spread == pytest.approx(4.0)
+    assert record.gross_pnl_capital == pytest.approx(0.04)
+    assert record.net_pnl == pytest.approx(0.04)
 
 
 def test_trade_ledger_raises_when_open_position_remains_and_forced_exit_is_disabled() -> None:

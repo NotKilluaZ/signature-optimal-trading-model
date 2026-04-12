@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-This project packages a GS-MS statistical-arbitrage experiment built around signature features and optimal stopping. In the current local reference run, the signature-based stopping strategy outperformed the moving-average baseline on total return (`22.39%` vs `5.24%`) while producing one additional trade (`5` vs `4`).
+This project packages a GS-MS statistical-arbitrage experiment built around signature features and optimal stopping. In the current local reference run, the signature-based stopping strategy outperformed the moving-average baseline on total return (`5.93%` vs `2.04%`) while producing one additional trade (`5` vs `4`).
 
-The current reference numbers come from the corrected normalized-spread pipeline rather than the older raw-price spread construction. That change materially reduced the exaggerated return profile from earlier local runs and brought the backtest onto a more realistic scale.
+The current reference numbers come from the corrected normalized-spread pipeline, with the baseline now evaluated under paper-style capital-based pair accounting rather than the older spread-unit equity approximation. That change materially reduced the exaggerated return profile from earlier local runs and brought the baseline onto a scale closer to the paper.
 
 The repo is deliberately checked in without raw data, checkpoints, or plots so Git history stays focused on the pipeline itself. Re-running the golden pipeline regenerates the figures, manifests, trade ledgers, and model artifacts locally.
 
@@ -19,6 +19,7 @@ The repo is deliberately checked in without raw data, checkpoints, or plots so G
 - Spread selection: evaluate `GS_minus_beta_MS` and `MS_minus_beta_GS`, choose the higher OU likelihood on the normalized formation window
 - Selected orientation in the reference run: `GS_minus_beta_MS`
 - Selected hedge ratio in the reference run: `beta = 0.862099`
+- Baseline accounting: capital-based pair returns with position size set from current equity and the first leg price at entry
 - Feature configuration: prefix signatures with depth `4`, scalar term enabled, time channel normalized on `[0, 1]`
 - Stopping thresholds: `k = 0.05`, `mu = 20.0`
 
@@ -28,18 +29,18 @@ The repo is deliberately checked in without raw data, checkpoints, or plots so G
 
 | Strategy | Trades | Win rate | Avg holding days | Sharpe | Max drawdown | Total net PnL | Final equity | Total return |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| SOT | 5 | 80.0% | 24.4 | 1.298 | -0.044 | 0.2239 | 1.2239 | 22.39% |
-| Baseline | 4 | 100.0% | 6.75 | 1.820 | 0.000 | 0.0524 | 1.0524 | 5.24% |
+| SOT | 5 | 60.0% | 36.2 | 0.464 | -0.146 | 0.0593 | 1.0593 | 5.93% |
+| Baseline | 4 | 50.0% | 6.75 | 0.265 | -0.099 | 0.0204 | 1.0204 | 2.04% |
 
-### Representative SOT Trade Ledger
+### Current SOT Trade Ledger
 
 | Trade | Entry date | Exit date | Holding days | Entry spread | Exit spread | Net PnL |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| 1 | 2022-01-31 | 2022-03-17 | 32 | 0.0281 | 0.1050 | 0.0748 |
-| 2 | 2022-04-06 | 2022-05-05 | 20 | 0.1402 | 0.0949 | -0.0475 |
-| 3 | 2022-06-01 | 2022-07-27 | 38 | 0.1356 | 0.1787 | 0.0410 |
-| 4 | 2022-10-10 | 2022-11-08 | 21 | 0.1383 | 0.2849 | 0.1444 |
-| 5 | 2022-12-15 | 2023-01-03 | 11 | 0.2048 | 0.2182 | 0.0112 |
+| 1 | 2022-01-07 | 2022-01-21 | 9 | 0.1823 | 0.0435 | -0.1409 |
+| 2 | 2022-01-27 | 2022-02-22 | 17 | 0.0029 | 0.0895 | 0.0845 |
+| 3 | 2022-03-23 | 2022-09-06 | 114 | 0.0946 | 0.1509 | 0.0542 |
+| 4 | 2022-09-15 | 2022-10-20 | 25 | 0.1295 | 0.2025 | 0.0708 |
+| 5 | 2022-12-08 | 2023-01-03 | 16 | 0.2253 | 0.2182 | -0.0092 |
 
 The fifth SOT trade was force-closed at the end of the trading horizon on `2023-01-03`, which is expected under the current engine configuration.
 
@@ -71,9 +72,9 @@ These cover the release checklist items for normalized prices, spread with entry
 
 ## Interpretation
 
-After correcting the spread construction to use normalized prices, the strategy no longer exhibits the unrealistic triple-digit returns seen in the earlier raw-price reference run. The updated backtest is still favorable to SOT on total PnL and total return, but it now presents a more balanced trade-off.
+After correcting the spread construction to use normalized prices and moving the baseline onto paper-style capital accounting, the strategy no longer exhibits the unrealistic baseline return inflation seen in the earlier spread-unit implementation. The updated comparison leaves the baseline much closer to the scale reported in the paper, even though it is not yet an exact match.
 
-Relative to the baseline, SOT in the current run holds positions longer, completes one additional trade, and finishes with materially higher total return. The baseline remains smoother on a risk-adjusted basis in this sample, with higher Sharpe and zero drawdown. That contrast is visible in the equity and trade ledgers and is exactly why the repo keeps manifests, validation checks, and per-trade artifacts as first-class outputs.
+Relative to the baseline, SOT in the current run holds positions longer, completes one additional trade, and finishes with both higher total return and higher Sharpe. The baseline now reports materially lower PnL because it is measured as capital returns from position-sized pair trades rather than as compounded spread-unit changes. That contrast is visible in the equity and trade ledgers and is exactly why the repo keeps manifests, validation checks, and per-trade artifacts as first-class outputs.
 
 The release-ready repo is therefore structured around reproducibility rather than around storing bulky outputs in Git. A clean clone can rebuild the full artifact tree locally and verify that the recorded metrics still line up with the published report.
 

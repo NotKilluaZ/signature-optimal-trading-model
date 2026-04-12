@@ -172,9 +172,61 @@ def build_batched_feature_tensor(
     library: str = "esig",
     device: str = "cpu",
     mode: str = "prefix",
-    basepoint: bool = False
+    basepoint: bool = False,
+    path_batch_size: int | None = None,
 ) -> BatchedFeatureBuildResult:
     resolved_dtype = np.dtype(dtype)
+
+    # If path_batch_size is set and the batch is large, process in chunks to
+    # avoid allocating the full (N, P, D) feature tensor in one shot
+    if path_batch_size is not None:
+        spreads_arr = np.asarray(spreads)
+        n_paths = spreads_arr.shape[0]
+        if n_paths > path_batch_size:
+            chunks_features: list[np.ndarray] = []
+            chunks_scaled: list[np.ndarray] = []
+            chunks_augmented: list[np.ndarray] = []
+            first_spec: dict[str, Any] | None = None
+            shared_prefix_ends: np.ndarray | None = None
+
+            for start in range(0, n_paths, path_batch_size):
+                chunk = spreads_arr[start : start + path_batch_size]
+                chunk_result = build_batched_feature_tensor(
+                    chunk, scaler, depth,
+                    min_prefix = min_prefix,
+                    prefix_ends = prefix_ends,
+                    scalar_term = scalar_term,
+                    dtype = resolved_dtype,
+                    time_representation = time_representation,
+                    library = library,
+                    device = device,
+                    mode = mode,
+                    basepoint = basepoint,
+                    path_batch_size = None,
+                )
+                chunks_features.append(chunk_result.features)
+                chunks_scaled.append(chunk_result.scaled_spreads)
+                chunks_augmented.append(chunk_result.augmented_paths)
+                if first_spec is None:
+                    first_spec = chunk_result.feature_spec
+                    shared_prefix_ends = chunk_result.prefix_ends
+
+            features = np.concatenate(chunks_features, axis = 0)
+            scaled_spreads_out = np.concatenate(chunks_scaled, axis = 0)
+            augmented_paths_out = np.concatenate(chunks_augmented, axis = 0)
+
+            full_spec = dict(first_spec)  # type: ignore[arg-type]
+            full_spec["batch_size_B"] = n_paths
+            full_spec["input_shape"] = [n_paths] + list(first_spec["input_shape"][1:])  # type: ignore[index]
+            full_spec["output_shape"] = list(features.shape)
+
+            return BatchedFeatureBuildResult(
+                features = features,
+                scaled_spreads = scaled_spreads_out,
+                augmented_paths = augmented_paths_out,
+                prefix_ends = shared_prefix_ends,  # type: ignore[arg-type]
+                feature_spec = full_spec,
+            )
 
     # Step 1: Scale each simulated spread path with the same formation-fitted scaler
     scaled_spreads = apply_batched_zscore_scaler(spreads, scaler, resolved_dtype)

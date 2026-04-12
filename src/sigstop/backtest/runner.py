@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
-from src.sigstop.backtest.accounting import build_trade_ledger, save_trade_ledger
+from src.sigstop.backtest.accounting import PairTradeAccountingSpec, build_trade_ledger, save_trade_ledger
 from src.sigstop.backtest.baseline import BaselineBacktestStrategy
 from src.sigstop.backtest.engine import (
     BacktestEngineResult,
@@ -43,7 +43,7 @@ from src.sigstop.backtest.validation import (
 from src.sigstop.config import load_config
 from src.sigstop.features.manifest import compute_file_sha256, safe_package_version
 from src.sigstop.generators.spec import build_generator_context
-from src.sigstop.paths import ROOT_DIR, RUNS_DIR, ensure_directories
+from src.sigstop.paths import PROCESSED_DATA_DIR, ROOT_DIR, RUNS_DIR, ensure_directories
 
 
 @dataclass(frozen = True)
@@ -102,14 +102,22 @@ def _get_config_value(config: dict[str, Any], path: list[str], default: Any = No
 # Load the default backtest inputs from saved artifacts
 def load_backtest_input_bundle(config: dict[str, Any]) -> BacktestInputBundle:
     context = build_generator_context(config)
-    trading_window = pd.read_parquet(context.trading_spread_path)
     selection_metadata = _load_json_file(context.selection_metadata_path)
     split_metadata = _load_json_file(context.split_metadata_path)
+    trading_spread = pd.read_parquet(context.trading_spread_path)
 
     pair_symbols = list(selection_metadata.get("pair", context.pair))
     pair_label = "-".join(pair_symbols) if pair_symbols else None
     beta = selection_metadata.get("chosen_beta")
     orientation = selection_metadata.get("chosen_orientation")
+    raw_trading_prices = pd.read_parquet(PROCESSED_DATA_DIR / "trading.parquet")
+    merge_columns = ["date"] + [symbol for symbol in pair_symbols if symbol in raw_trading_prices.columns]
+    trading_window = trading_spread.merge(
+        raw_trading_prices[merge_columns],
+        on = "date",
+        how = "left",
+        validate = "one_to_one",
+    )
 
     return BacktestInputBundle(
         trading_window = validate_trading_window(trading_window),
@@ -175,6 +183,7 @@ def run_full_backtest(
             config = resolved_config,
             pair_label = resolved_input_bundle.pair_label,
             beta = resolved_input_bundle.beta,
+            orientation = resolved_input_bundle.orientation,
             output_dir = strategy_output_dir,
         )
 
@@ -256,9 +265,19 @@ def run_strategy_backtest(
     config: dict[str, Any],
     pair_label: str | None,
     beta: float | None,
+    orientation: str | None,
     output_dir: Path,
 ) -> StrategyBacktestArtifacts:
     output_dir.mkdir(parents = True, exist_ok = True)
+    metrics_config = build_backtest_metrics_config(
+        config,
+        annualization_factor = build_backtest_engine_config(config).annualization_factor,
+    )
+    pair_trade_accounting = _build_pair_trade_accounting_spec(
+        strategy_name = strategy_name,
+        beta = beta,
+        orientation = orientation,
+    )
 
     engine_result = run_backtest_engine(trading_window, strategy, config = config)
     step_records_frame = build_step_records_frame(engine_result)
@@ -270,6 +289,8 @@ def run_strategy_backtest(
         config = config,
         pair = pair_label,
         beta = beta,
+        initial_equity = metrics_config.initial_equity,
+        pair_trade_accounting = pair_trade_accounting,
     )
     trades_path = save_trade_ledger(ledger_result.trade_ledger, output_dir / "trades.csv")
 
@@ -282,6 +303,7 @@ def run_strategy_backtest(
         trading_window.iloc[: engine_result.trading_window_length].reset_index(drop = True),
         strategy = strategy_name,
         initial_equity = metrics_config.initial_equity,
+        pair_trade_accounting = pair_trade_accounting,
     )
     equity_curve_path = save_equity_curve(equity_curve, output_dir / "equity_curve.csv")
 
@@ -319,6 +341,30 @@ def run_strategy_backtest(
         step_records_path = step_records_path,
         summary_path = summary_path,
         validation_path = validation_path,
+    )
+
+
+def _build_pair_trade_accounting_spec(
+    *,
+    strategy_name: str,
+    beta: float | None,
+    orientation: str | None,
+) -> PairTradeAccountingSpec | None:
+    if strategy_name != "baseline" or beta is None or orientation is None:
+        return None
+    if orientation == "GS_minus_beta_MS":
+        leg_1_symbol = "GS"
+        leg_2_symbol = "MS"
+    elif orientation == "MS_minus_beta_GS":
+        leg_1_symbol = "MS"
+        leg_2_symbol = "GS"
+    else:
+        raise ValueError(f"Unsupported spread orientation for pair accounting: {orientation!r}")
+
+    return PairTradeAccountingSpec(
+        leg_1_symbol = leg_1_symbol,
+        leg_2_symbol = leg_2_symbol,
+        beta = float(beta),
     )
 
 

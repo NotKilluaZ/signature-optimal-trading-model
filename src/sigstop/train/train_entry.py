@@ -34,6 +34,9 @@ def build_entry_training_data(
 ) -> StoppingTrainingData:
     scaler = fit_zscore_scaler(formation_spread)
 
+    _raw_path_batch_size = _get_config_value(config, ["features", "signature", "path_batch_size"], None)
+    path_batch_size = int(_raw_path_batch_size) if _raw_path_batch_size is not None else None
+
     feature_result = build_batched_feature_tensor(
         spread_paths,
         scaler,
@@ -54,6 +57,7 @@ def build_entry_training_data(
         device = str(_get_config_value(config, ["features", "signature", "device"], "cpu")),
         basepoint = bool(_get_config_value(config, ["features", "signature", "basepoint"], False)),
         mode = "prefix",
+        path_batch_size = path_batch_size,
     )
 
     dt = float(_get_config_value(config, ["generator", "fit", "dt"], 1.0))

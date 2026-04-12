@@ -34,7 +34,9 @@ def validate_weight_vector(weights: np.ndarray | list[float]) -> np.ndarray:
 def validate_signature_feature_tensor(
     features: np.ndarray | list[list[float]] | list[list[list[float]]],
 ) -> tuple[np.ndarray, bool]:
-    x = np.asarray(features, dtype = float)
+    x = np.asarray(features)
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
     squeezed = False
 
     if x.ndim == 2:

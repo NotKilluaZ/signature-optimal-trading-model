@@ -33,13 +33,30 @@ def summarize_array(features: np.ndarray) -> dict[str, Any]:
     if not np.all(np.isfinite(features)):
         raise ValueError("Feature tensor contains NaN or infinite value(s)")
 
+    flat = features.ravel()
+    n = flat.size
+
+    # Process in small chunks so peak temporary memory stays ~2 MiB regardless of array size
+    _CHUNK = 250_000
+    lo = float(flat[0])
+    hi = float(flat[0])
+    s1 = 0.0
+    s2 = 0.0
+    for start in range(0, n, _CHUNK):
+        chunk = flat[start : start + _CHUNK]
+        lo = min(lo, float(chunk.min()))
+        hi = max(hi, float(chunk.max()))
+        s1 += float(np.sum(chunk, dtype = np.float64))
+        s2 += float(np.sum(np.square(chunk), dtype = np.float64))
+    mean = s1 / n
+    std = float(np.sqrt(max(0.0, s2 / n - mean * mean)))
     return {
         "dtype": str(features.dtype),
         "shape": list(features.shape),
-        "min": float(np.min(features)),
-        "max": float(np.max(features)),
-        "mean": float(np.mean(features)),
-        "std": float(np.std(features))
+        "min": lo,
+        "max": hi,
+        "mean": mean,
+        "std": std,
     }
 
 # Main manifest

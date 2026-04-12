@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.sigstop.backtest.accounting import PairTradeAccountingSpec
 from src.sigstop.backtest.metrics import (
     BacktestMetricsConfig,
     build_backtest_metrics_config,
@@ -29,9 +30,12 @@ def _toy_trade_ledger() -> pd.DataFrame:
             "trade_id": [1, 2],
             "strategy": ["sot", "sot"],
             "pair": ["GS-MS", "GS-MS"],
-            "exit_idx": [1, 3],
-            "net_pnl": [0.5, -0.2],
-            "holding_days": [2, 1],
+            "entry_idx": [0, 3],
+            "exit_idx": [1, 4],
+            "cost_entry": [0.0, 0.0],
+            "cost_exit": [0.0, 0.0],
+            "net_pnl": [0.5, -0.15],
+            "holding_days": [1, 1],
             "forced_exit": [False, False],
         }
     )
@@ -60,13 +64,13 @@ def test_build_equity_curve_accumulates_daily_realized_trade_pnl() -> None:
         initial_equity = 1.0,
     )
 
-    np.testing.assert_allclose(equity_curve["daily_net_pnl"], [0.0, 0.5, 0.0, -0.2, 0.0])
-    np.testing.assert_allclose(equity_curve["cumulative_net_pnl"], [0.0, 0.5, 0.5, 0.3, 0.3])
-    np.testing.assert_allclose(equity_curve["equity"], [1.0, 1.5, 1.5, 1.3, 1.3])
-    np.testing.assert_allclose(equity_curve["daily_return"], [0.0, 0.5, 0.0, -0.1333333333333333, 0.0])
+    np.testing.assert_allclose(equity_curve["daily_net_pnl"], [0.0, 0.5, 0.0, 0.0, -0.15])
+    np.testing.assert_allclose(equity_curve["cumulative_net_pnl"], [0.0, 0.5, 0.5, 0.5, 0.35])
+    np.testing.assert_allclose(equity_curve["equity"], [1.0, 1.5, 1.5, 1.5, 1.35])
+    np.testing.assert_allclose(equity_curve["daily_return"], [0.0, 0.5, 0.0, 0.0, -0.1])
     np.testing.assert_allclose(equity_curve["running_peak"], [1.0, 1.5, 1.5, 1.5, 1.5])
-    np.testing.assert_allclose(equity_curve["drawdown"], [0.0, 0.0, 0.0, -0.1333333333333333, -0.1333333333333333])
-    np.testing.assert_array_equal(equity_curve["cumulative_trade_count"], [0, 1, 1, 2, 2])
+    np.testing.assert_allclose(equity_curve["drawdown"], [0.0, 0.0, 0.0, 0.0, -0.1])
+    np.testing.assert_array_equal(equity_curve["cumulative_trade_count"], [0, 1, 1, 1, 2])
 
 
 def test_performance_summary_computes_trade_and_curve_metrics() -> None:
@@ -94,13 +98,13 @@ def test_performance_summary_computes_trade_and_curve_metrics() -> None:
     assert summary.pair == "GS-MS"
     assert summary.trade_count == 2
     assert summary.win_rate == pytest.approx(0.5)
-    assert summary.average_holding_days == pytest.approx(1.5)
-    assert summary.max_drawdown == pytest.approx(-0.1333333333333333)
+    assert summary.average_holding_days == pytest.approx(1.0)
+    assert summary.max_drawdown == pytest.approx(-0.1)
     assert summary.sharpe_ann == pytest.approx(expected_sharpe)
-    assert summary.total_net_pnl == pytest.approx(0.3)
-    assert summary.final_cumulative_net_pnl == pytest.approx(0.3)
-    assert summary.final_equity == pytest.approx(1.3)
-    assert summary.total_return == pytest.approx(0.3)
+    assert summary.total_net_pnl == pytest.approx(0.35)
+    assert summary.final_cumulative_net_pnl == pytest.approx(0.35)
+    assert summary.final_equity == pytest.approx(1.35)
+    assert summary.total_return == pytest.approx(0.35)
     assert summary.annualized_return is not None
 
 
@@ -150,8 +154,11 @@ def test_build_comparison_metrics_table_stacks_strategy_summaries() -> None:
                         "trade_id": [1],
                         "strategy": ["baseline"],
                         "pair": ["GS-MS"],
+                        "entry_idx": [1],
                         "exit_idx": [2],
-                        "net_pnl": [0.1],
+                        "cost_entry": [0.0],
+                        "cost_exit": [0.0],
+                        "net_pnl": [0.2],
                         "holding_days": [1],
                         "forced_exit": [False],
                     }
@@ -162,8 +169,11 @@ def test_build_comparison_metrics_table_stacks_strategy_summaries() -> None:
                             "trade_id": [1],
                             "strategy": ["baseline"],
                             "pair": ["GS-MS"],
+                            "entry_idx": [1],
                             "exit_idx": [2],
-                            "net_pnl": [0.1],
+                            "cost_entry": [0.0],
+                            "cost_exit": [0.0],
+                            "net_pnl": [0.2],
                             "holding_days": [1],
                             "forced_exit": [False],
                         }
@@ -182,3 +192,46 @@ def test_build_comparison_metrics_table_stacks_strategy_summaries() -> None:
     assert "max_drawdown" in metrics_table.columns
     assert metrics_table.loc[0, "trade_count"] == 2
     assert metrics_table.loc[1, "trade_count"] == 1
+
+
+def test_build_equity_curve_supports_paper_capital_pair_accounting() -> None:
+    trade_ledger = pd.DataFrame(
+        {
+            "trade_id": [1],
+            "strategy": ["baseline"],
+            "pair": ["GS-MS"],
+            "entry_idx": [1],
+            "exit_idx": [3],
+            "cost_entry": [0.0],
+            "cost_exit": [0.0],
+            "net_pnl": [0.04],
+            "holding_days": [2],
+            "forced_exit": [False],
+            "position_units": [0.01],
+            "accounting_model": ["paper_capital_pair"],
+        }
+    )
+    trading_window = pd.DataFrame(
+        {
+            "date": pd.date_range("2022-01-03", periods = 5, freq = "B"),
+            "spread": [50.0, 50.0, 51.0, 54.0, 54.0],
+            "GS": [100.0, 100.0, 102.0, 105.0, 105.0],
+            "MS": [50.0, 50.0, 51.0, 51.0, 51.0],
+        }
+    )
+
+    equity_curve = build_equity_curve(
+        trade_ledger,
+        trading_window,
+        strategy = "baseline",
+        initial_equity = 1.0,
+        pair_trade_accounting = PairTradeAccountingSpec(
+            leg_1_symbol = "GS",
+            leg_2_symbol = "MS",
+            beta = 1.0,
+        ),
+    )
+
+    np.testing.assert_allclose(equity_curve["daily_net_pnl"], [0.0, 0.0, 0.01, 0.03, 0.0])
+    np.testing.assert_allclose(equity_curve["cumulative_net_pnl"], [0.0, 0.0, 0.01, 0.04, 0.04])
+    np.testing.assert_allclose(equity_curve["equity"], [1.0, 1.0, 1.01, 1.04, 1.04])
