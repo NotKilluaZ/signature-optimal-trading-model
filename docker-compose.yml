@@ -1,0 +1,14 @@
+services:
+  quant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sigstop-gs-ms:latest
+    working_dir: /workspace
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      MPLBACKEND: Agg
+    volumes:
+      - .:/workspace

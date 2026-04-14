@@ -13,26 +13,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-
-      - name: Install dependencies
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
+      - name: Build Docker image
+        run: docker build --tag sigstop-gs-ms-ci .
 
       - name: Run unit tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: pytest
+        run: docker run --rm sigstop-gs-ms-ci pytest
 
       - name: Validate package environment
-        run: python -m pip check
+        run: docker run --rm sigstop-gs-ms-ci python -m pip check
 
       - name: Compile Python sources
-        run: python -m compileall src scripts tests
+        run: docker run --rm sigstop-gs-ms-ci python -m compileall src scripts tests

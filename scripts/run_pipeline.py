@@ -20,7 +20,7 @@ PIPELINE_STEPS = [
     "scripts.run_backtest",
 ]
 
-# Run this command from project root, with venv active:   python scripts/run_pipeline.py
+# Run from the project root or inside the Docker container: python -m scripts.run_pipeline
 def main() -> None:
     print("Running quant pipeline...\n")
 

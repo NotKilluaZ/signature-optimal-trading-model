@@ -26,6 +26,8 @@ More detail lives in [Results.md](Results.md).
 | `src/sigstop/` | Core pipeline code for data, spread construction, OU generation, features, stopping, training, and backtesting |
 | `scripts/` | CLI entrypoints for each pipeline stage plus the one-shot golden run |
 | `configs/default.yaml` | Default experiment configuration |
+| `Dockerfile` | Docker image definition for the project runtime |
+| `docker-compose.yml` | Docker-first local workflow with the repo bind-mounted into the container |
 | `tests/` | Unit and smoke tests for the backtest and training surface |
 | `data/README.md` | Notes on generated datasets and caches |
 | `runs/README.md` | Notes on generated backtest outputs and manifests |
@@ -33,42 +35,44 @@ More detail lives in [Results.md](Results.md).
 
 ## Setup
 
-Use Python 3.12
+Use Docker with the Compose plugin.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e .[dev]
+docker compose build
 ```
 
-If you are running CPU-only PyTorch locally, `torch>=2.11,<2.12` is intentionally left without a CUDA-specific wheel tag so the environment stays portable across GitHub Actions and local machines.
+The `quant` service bind-mounts this repository into `/workspace`, so generated `data/` and `runs/` artifacts stay on your host machine while the code runs entirely inside the container. Rebuild the image after dependency changes with `docker compose build`.
 
 ## Quick Start
 
 Run the full release pipeline and write a stable artifact bundle:
 
 ```powershell
-python -m scripts.run_golden --run-id golden_release
+docker compose run --rm quant python -m scripts.run_golden --run-id golden_release
 ```
 
 Run only the final backtest stage against existing cached artifacts:
 
 ```powershell
-python -m scripts.run_backtest --run-id golden_release
+docker compose run --rm quant python -m scripts.run_backtest --run-id golden_release
 ```
 
 Run the existing default end-to-end pipeline without a special run id:
 
 ```powershell
-python -m scripts.run_pipeline
+docker compose run --rm quant
 ```
 
 Run tests:
 
 ```powershell
-pytest
+docker compose run --rm quant pytest
+```
+
+Open an interactive shell in the container:
+
+```powershell
+docker compose run --rm quant sh
 ```
 
 ## Reference Results
@@ -97,7 +101,7 @@ Because generated artifacts are ignored, figures and manifests are recreated loc
 
 ## What the Golden Run Produces
 
-After `python -m scripts.run_golden --run-id golden_release`, you should expect:
+After `docker compose run --rm quant python -m scripts.run_golden --run-id golden_release`, you should expect:
 
 - `data/processed/artifacts/plots/gs_ms_normalized_prices.png`
 - `data/processed/artifacts/plots/gs_ms_spread_trading.png`
@@ -112,7 +116,7 @@ After `python -m scripts.run_golden --run-id golden_release`, you should expect:
 - The public release is scoped to the GS-MS experiment; spread construction is still hard-coded to that pair.
 - The repo is a research prototype and does not support live trading or broker integration.
 - Hyperparameter sweeps and richer calibration studies are still manual rather than automated report-generation steps.
-- The README documents one reference run; if the strategy logic changes, rerun `scripts.run_golden` and refresh `Results.md`.
+- The README documents one reference run; if the strategy logic changes, rerun `docker compose run --rm quant python -m scripts.run_golden --run-id golden_release` and refresh `Results.md`.
 
 ## License, Citation, and Disclaimer
 

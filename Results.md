@@ -56,7 +56,7 @@ The latest reference backtest passed the built-in validation suite:
 Run the golden release pipeline and inspect these locally generated artifacts:
 
 ```powershell
-python -m scripts.run_golden --run-id golden_release
+docker compose run --rm quant python -m scripts.run_golden --run-id golden_release
 ```
 
 Expected figure paths:
@@ -80,7 +80,7 @@ The release-ready repo is therefore structured around reproducibility rather tha
 
 ## Reproduction Notes
 
-- Install with `pip install -r requirements.txt` and `pip install -e .[dev]`
-- Run `python -m scripts.run_golden --run-id golden_release`
+- Build the image with `docker compose build`
+- Run `docker compose run --rm quant python -m scripts.run_golden --run-id golden_release`
 - Inspect `runs/golden_release/backtest/manifest.json` for hashes, seeds, versions, and artifact references
-- Run `pytest` to verify the unit and smoke-test surface before publishing changes
+- Run `docker compose run --rm quant pytest` to verify the unit and smoke-test surface before publishing changes
